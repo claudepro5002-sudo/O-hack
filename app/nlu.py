@@ -9,7 +9,7 @@ import re
 from calendar import monthrange
 from datetime import date, timedelta
 
-from .data.destinations import COUNTRY_ALIASES, DESTINATIONS
+from .data.destinations import COUNTRY_ALIASES, DESTINATIONS, GATEWAYS, UNKNOWN_PLACES
 from .data.geo import ORIGINS
 from .state import today
 
@@ -94,24 +94,29 @@ def _next_weekday(start: date, wd: int) -> date:
 
 def parse_dates(t: str, out: dict) -> None:
     td = today()
-    # с 10 по 17 ноября / 10-17 ноября
-    m = re.search(r"(?:с\s+)?(\d{1,2})\s*(?:-|–|—|по|до)\s*(\d{1,2})\s+" + MONTH_RE, t)
+    # диапазоны: «с 10 по 17 ноября», «с 28 декабря по 5 января», «с 1 июня 2027 по 1 июня 2028 года»,
+    # «с 1 июня по 1 июня следующего года»
+    year_re = r"(?:\s+(\d{4})\s*(?:г(?:ода|од)?\.?)?)?"
+    m = re.search(r"(?<![\d.])(\d{1,2})(?:\s+" + MONTH_RE + r")?" + year_re + r"\s*(?:-|–|—|по|до)\s*"
+                  r"(\d{1,2})\s+" + MONTH_RE + year_re + r"(\s+следующ\w+\s+год\w*)?", t)
     if m:
-        mon = month_from_stem(m.group(3))
-        d1, d2 = _mkdate(int(m.group(1)), mon), _mkdate(int(m.group(2)), mon)
-        if d1 and d2:
-            if d2 <= d1:
-                d1 = _mkdate(int(m.group(1)), mon - 1 if mon > 1 else 12) or d1
-            out.update(date_from=d1.isoformat(), date_to=d2.isoformat(), month=d1.month, flexible=False)
-            return
-    # с 28 декабря по 5 января
-    m = re.search(r"(?:с\s+)?(\d{1,2})\s+" + MONTH_RE + r"\s*(?:-|–|—|по|до)\s*(\d{1,2})\s+" + MONTH_RE, t)
-    if m:
-        m1, m2 = month_from_stem(m.group(2)), month_from_stem(m.group(4))
-        d1 = _mkdate(int(m.group(1)), m1)
-        d2 = _mkdate(int(m.group(3)), m2, (d1.year + (1 if m2 < m1 else 0)) if d1 else None)
+        day1, mon1_s, y1_s, day2, mon2_s, y2_s, next_year = m.groups()
+        mon2 = month_from_stem(mon2_s)
+        mon1 = month_from_stem(mon1_s) if mon1_s else mon2
+        if not mon1_s and int(day1) > int(day2):  # «с 30 по 3 января» — начало в предыдущем месяце
+            mon1 = mon2 - 1 if mon2 > 1 else 12
+        y1 = int(y1_s) if y1_s else None
+        y2 = int(y2_s) if y2_s else None
+        if y1 is None:
+            if y2 is not None:
+                y1 = y2 if (mon1, int(day1)) < (mon2, int(day2)) else y2 - 1
+            else:
+                y1 = _year_for(mon1, int(day1))
+        if y2 is None:
+            y2 = y1 + 1 if next_year or (mon2, int(day2)) <= (mon1, int(day1)) else y1
+        d1, d2 = _mkdate(int(day1), mon1, y1), _mkdate(int(day2), mon2, y2)
         if d1 and d2 and d2 > d1:
-            out.update(date_from=d1.isoformat(), date_to=d2.isoformat(), month=d1.month, flexible=False)
+            out.update(date_from=d1.isoformat(), date_to=d2.isoformat(), month=d1.month, year=d1.year, flexible=False)
             return
     # 12.11 - 19.11 / 12.11.2026
     ds = re.findall(r"\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b", t)
@@ -165,10 +170,10 @@ def parse_dates(t: str, out: dict) -> None:
         m_ = td.month % 12 + 1
         out.update(month=m_, year=_year_for(m_))
         return
-    # одиночная дата: «с 12 ноября», «12 ноября»
-    m = re.search(r"(?:с\s+|на\s+|вылет\s+)?(\d{1,2})\s+" + MONTH_RE, t)
-    if m and not re.search(r"\d{1,2}\s+" + MONTH_RE + r"\s+(лет|год)", t):
-        d = _mkdate(int(m.group(1)), month_from_stem(m.group(2)))
+    # одиночная дата: «с 12 ноября», «12 ноября 2027»
+    m = re.search(r"(?:с\s+|на\s+|вылет\s+)?(?<![\d.])(\d{1,2})\s+" + MONTH_RE + r"(?:\s+(\d{4}))?", t)
+    if m and not re.search(r"\d{1,2}\s+" + MONTH_RE + r"\s+(лет|год)(?!а\b)", t):
+        d = _mkdate(int(m.group(1)), month_from_stem(m.group(2)), int(m.group(3)) if m.group(3) else None)
         if d:
             out.update(date_from=d.isoformat(), month=d.month, flexible=False)
             return
@@ -217,7 +222,7 @@ def parse_duration(t: str, out: dict) -> None:
     m = re.search(r"\b(\d+|" + "|".join(NUM_WORDS) + r")\s*(ноч|дней|дня|суток)", t)
     if m and not re.search(r"(позже|раньше)", t):
         n = to_num(m.group(1))
-        if n and n < 40:
+        if n and n < 400:
             out["nights"] = n if m.group(2).startswith("ноч") else (max(1, n - 1) if n <= 4 else n)
             return
     if re.search(r"полторы недел", t):
@@ -285,6 +290,9 @@ def parse_party(t: str, out: dict, expect_ages: bool = False) -> None:
         ages.append(14)
     if re.search(r"школьник", t) and not ages:
         ages.append(10)
+    if ages and kids and kids > len(ages) == 1 and re.search(r"\bпо\s+\d{1,2}\s*(?:-?\s*(?:ти|ми|х))?\s*(лет|год|мес)|"
+                                                            r"оба\w*\s+\d|обоим\s+\d|близнец|двойняшк", t):
+        ages = ages * kids  # «двое детей по 7 лет», «близнецы 5 лет»
     if ages:
         if kids is None or kids == -1 or kids < len(ages):
             kids = len(ages)
@@ -395,6 +403,12 @@ def parse_budget(t: str, out: dict) -> None:
 
 # ---------------------------------------------------------------- места
 
+ORIGIN_STOP = {"них", "этих", "этого", "этой", "тех", "двух", "трех", "всех", "списка", "предложенных", "вариантов", "вариант",
+               "отеля", "дома", "отпуска", "офиса", "чего", "него", "нее", "россии", "города", "страны", "поездки", "поездка",
+               "отдыхать", "отдохнуть", "поехать", "полететь", "хотим", "хочу", "едем", "летим", "вдвоем", "втроем", "семьей",
+               "детьми", "ребенком", "собакой", "женой", "мужем", "друзьями", "москвы", "сразу", "самолета", "поезда", "аэропорта",
+               "работы", "командировки", "моря", "отпуск", "через", "ближайшего", "какого", "любого", "далеко", "неделю"}
+
 def parse_places(t: str, out: dict) -> None:
     # город вылета
     origin_spans = []
@@ -406,6 +420,23 @@ def parse_places(t: str, out: dict) -> None:
                 out["origin"] = o.code
                 origin_spans.append((m.start(), m.end()))
                 break
+    if "origin" not in out:
+        # город вылета не из справочника: «из Магнитогорска», «город вылета — Магнитогорск»
+        place = r"([а-я][а-я-]{3,}(?:\s+[а-я][а-я-]{3,})?)"
+        m = re.search(r"(?:город\w*\s+вылета|вылет\w*)\s*(?:из|на|—|-|:)?\s*" + place, t) or \
+            re.search(r"(?:стартуем|выезжаем|едем|летим|мы|я)\s+из\s+" + place, t) or \
+            re.search(r"(?:живу|живем|живём)\s+в\s+" + place, t)
+        strong = bool(m)
+        if not m:
+            m = re.search(r"(?<![а-я])из\s+" + place, t)
+        if m:
+            words = m.group(1).split()
+            if words[0] not in ORIGIN_STOP and not re.match(MONTH_RE, words[0]):
+                two = len(words) == 2 and words[1] not in ORIGIN_STOP and words[1].endswith(("а", "я", "и", "ы", "е", "о"))
+                out["_origin_place"] = " ".join(words) if two else words[0]
+                out["_origin_strong"] = strong
+                origin_spans.append((m.start(), m.end()))
+
     def in_origin(pos):
         return any(a <= pos < b for a, b in origin_spans)
     # исключения: «не в Турцию», «кроме Египта»
@@ -443,6 +474,21 @@ def parse_places(t: str, out: dict) -> None:
             out["destination"] = dests[0]
         else:
             out["country"] = c
+    if "destination" not in out:
+        for pat, dest_id, note in GATEWAYS:
+            m = re.search(r"(?<![а-я])(?:" + pat + ")", t)
+            if m and not in_origin(m.start()):
+                out["destination"], out["_gateway_note"] = dest_id, note
+                out.pop("country", None)
+                break
+    if "destination" not in out and "country" not in out:
+        for pat, name, prefs, similar in UNKNOWN_PLACES:
+            m = re.search(r"(?<![а-я])(?:" + pat + ")", t)
+            if m and not in_origin(m.start()):
+                word = re.match(r"[а-я-]+", t[m.start():]).group(0)
+                out["_unknown_place"] = {"name": name, "prefs": list(prefs), "similar": list(similar), "word": m.group(0),
+                                         "query": word.capitalize()}
+                break
     if re.search(r"куда[- ]?(нибудь|угодно|то)|не знаю куда|посоветуй\w* (куда|направлен)|предлож\w+ (куда|направлен|вариант)|"
                  r"любое направлен|без разницы куда|куда поехать|куда полететь|куда съездить|куда махнуть", t):
         out["_open_destination"] = True
@@ -458,6 +504,8 @@ def parse_prefs(t: str, out: dict) -> None:
     if "warm" in prefs and re.search(r"не\s+(люблю|хочу|переношу)\s+жар|без жары|не\s+жарк|не в жару|жару не", t):
         prefs.remove("warm")
         prefs.append("mild")
+    if "mild" not in prefs and re.search(r"без жары|не жарко|нежарк|не в жару", t):
+        prefs = [p for p in prefs if p != "warm"] + ["mild"]
     if re.search(r"не\s+(люблю|хочу)\s+(тус|шум|толп)", t):
         prefs = [p for p in prefs if p != "party"] + ["quiet"]
     if "sea" in prefs and re.search(r"\bморе не\b|без моря|не (на )?море", t):
@@ -597,7 +645,7 @@ def parse_intent(t: str, out: dict, stage: str) -> None:
         out["_intent"] = "why"
     elif has(r"(покажи|другие|другой|сравни|еще|ещё)\s+(\w+\s+)?(отел|гостиниц|вариант\w* (отел|жиль)|жиль)"):
         out["_intent"] = "show_hotels"
-    elif has(r"(покажи|другие|другой|сравни|еще|ещё)\s+(\w+\s+)?(рейс|перел|билет|поезд)"):
+    elif has(r"(покажи|другие|другой|сравни|еще|ещё)\s+(\w+\s+)?(рейс|перел|билет|поезд|маршрут)"):
         out["_intent"] = "show_flights"
     elif has(r"(другие|другое|еще|ещё|покажи)\s+(\w+\s+)?(направлен|страны|страну|места|город)|куда еще|куда ещё|вернись к направлен|"
              r"к выбору направлен|не нравится направлен"):

@@ -26,12 +26,51 @@ ORIGINS: list[Origin] = [
     Origin("OVB", "Новосибирск", "Новосибирска", 55.03, 82.92, 7, ("новосиб", "нск"), "Толмачёво"),
     Origin("KUF", "Самара", "Самары", 53.2, 50.15, 4, ("самар",), "Курумоч"),
     Origin("UFA", "Уфа", "Уфы", 54.74, 55.97, 5, ("уфа", "уфы", "уфе"), "Уфа"),
-    Origin("GOJ", "Нижний Новгород", "Нижнего Новгорода", 56.33, 44.0, 3, ("нижн", "нижегород"), "Стригино"),
+    Origin("GOJ", "Нижний Новгород", "Нижнего Новгорода", 56.33, 44.0, 3, ("нижний новг", "нижнего новг", "нижнем новг", "нижний", "нижегород"), "Стригино"),
     Origin("PEE", "Пермь", "Перми", 58.01, 56.25, 5, ("перм",), "Большое Савино"),
     Origin("VVO", "Владивосток", "Владивостока", 43.12, 131.89, 10, ("владивосток", "владик"), "Кневичи"),
 ]
 
-ORIGIN_BY_CODE = {o.code: o for o in ORIGINS}
+class _OriginRegistry(dict):
+    """10 городов из справочника + любые города вылета, которые агент узнал от LLM (коды «o-…»)."""
+
+    loader = None  # устанавливается модулем app.dynamic
+
+    def __missing__(self, key: str) -> Origin:
+        if self.loader is not None:
+            o = self.loader(key)
+            if o is not None:
+                self[key] = o
+                return o
+        raise KeyError(key)
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __contains__(self, key) -> bool:
+        return self.get(key) is not None
+
+
+ORIGIN_BY_CODE: dict[str, Origin] = _OriginRegistry({o.code: o for o in ORIGINS})
+
+# Пересадочные хабы за рубежом — для направлений без прямых рейсов из России
+FOREIGN_HUBS = {
+    "IST": Origin("IST", "Стамбул", "Стамбула", 41.26, 28.74, 3, (), "Стамбул"),
+    "DXB": Origin("DXB", "Дубай", "Дубая", 25.25, 55.36, 4, (), "Дубай"),
+    "BEG": Origin("BEG", "Белград", "Белграда", 44.82, 20.29, 1, (), "Белград"),
+}
+HUB_AIRLINES = {
+    "IST": [("TK", "Turkish Airlines", False, True), ("PC", "Pegasus", True, True)],
+    "DXB": [("EK", "Emirates", False, True), ("FZ", "flydubai", True, True)],
+    "BEG": [("JU", "Air Serbia", False, True)],
+}
+
+
+def hub_point(code: str) -> Origin:
+    return ORIGIN_BY_CODE.get(code) or FOREIGN_HUBS[code]
 
 # Город вылета, который совпадает с направлением (не предлагаем «из Москвы в Москву»)
 ORIGIN_SAME_DEST = {"MOW": "moscow", "LED": "spb", "KZN": "kazan"}

@@ -30,28 +30,63 @@ PREFS = ["sea", "warm", "mild", "culture", "food", "party", "quiet", "romantic",
 
 
 def enabled() -> bool:
-    return bool(os.getenv("LLM_API_KEY")) and os.getenv("LLM_ENABLED", "true").lower() not in ("0", "false", "no")
+    """LLM включена, только если при запуске заданы ключ, адрес API и модель (в коде их нет)."""
+    return all(os.getenv(k) for k in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL")) and \
+        os.getenv("LLM_ENABLED", "true").lower() not in ("0", "false", "no")
 
 
-def _chat(messages: list[dict], max_tokens: int = 600, json_mode: bool = True) -> str | None:
-    base = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
-    timeout = float(os.getenv("LLM_TIMEOUT", "20"))
+def models() -> list[str]:
+    """LLM_MODEL может содержать несколько моделей через запятую — запасные на случай лимитов."""
+    return [m.strip() for m in os.getenv("LLM_MODEL", "").split(",") if m.strip()]
+
+
+def model_name() -> str | None:
+    return ", ".join(models()) if enabled() else None
+
+
+def is_reasoning_model(model: str) -> bool:
+    m = model.lower()
+    return any(x in m for x in ("gpt-oss", "deepseek-r1", "reasoner", "qwq", ":thinking", "o1", "o3", "o4-mini", "-r1",
+                                "nemotron", "gemma-4", "reasoning"))
+
+
+def request(model: str, messages: list[dict], max_tokens: int, json_mode: bool, client: httpx.Client) -> httpx.Response:
+    """Один запрос к chat/completions с учётом особенностей модели."""
+    base = os.getenv("LLM_BASE_URL", "").rstrip("/")
+    reasoning = is_reasoning_model(model)
+    if reasoning:
+        max_tokens *= 4  # рассуждающие модели тратят часть лимита на «мысли» — даём запас
     body = {"model": model, "messages": messages, "temperature": 0, "max_tokens": max_tokens}
+    if reasoning and "openrouter.ai" in base:
+        body["reasoning"] = {"effort": "low", "exclude": True}
     if json_mode:
         body["response_format"] = {"type": "json_object"}
     headers = {"Authorization": f"Bearer {os.getenv('LLM_API_KEY')}", "Content-Type": "application/json"}
+    r = client.post(f"{base}/chat/completions", json=body, headers=headers)
+    if r.status_code == 400 and (json_mode or "reasoning" in body):  # сервер не знает доп. параметры
+        body.pop("response_format", None)
+        body.pop("reasoning", None)
+        r = client.post(f"{base}/chat/completions", json=body, headers=headers)
+    return r
+
+
+def _chat(messages: list[dict], max_tokens: int = 600, json_mode: bool = True) -> str | None:
+    timeout = float(os.getenv("LLM_TIMEOUT", "20"))
     try:
         with httpx.Client(timeout=timeout) as c:
-            r = c.post(f"{base}/chat/completions", json=body, headers=headers)
-            if r.status_code == 400 and json_mode:  # сервер не поддерживает response_format
-                body.pop("response_format")
-                r = c.post(f"{base}/chat/completions", json=body, headers=headers)
-            r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"]
+            for model in models():
+                r = request(model, messages, max_tokens, json_mode, c)
+                if r.status_code in (402, 404, 408, 429) or r.status_code >= 500:
+                    log.warning("LLM %s: HTTP %s — пробую следующую модель", model, r.status_code)
+                    continue
+                r.raise_for_status()
+                content = r.json()["choices"][0]["message"].get("content") or ""
+                if content.strip():
+                    return content
+                log.warning("LLM %s вернула пустой ответ (возможно, не хватило max_tokens)", model)
     except Exception as e:  # noqa: BLE001 — сеть/формат: тихо откатываемся на правила
         log.warning("LLM недоступна: %s", e)
-        return None
+    return None
 
 
 def _system_prompt(today_iso: str) -> str:
@@ -74,6 +109,10 @@ stars_min: 2-5; beach_close: bool; center_close: bool; visa_free: bool; priority
 flight_time_pref: "morning"|"day"|"evening"
 _intent: одно из {INTENTS} или не указывай. shift_dates → _shift: дни (+позже/−раньше); extend → _extend: ±ночей.
 choose → _choice_idx (0-based) или _choice_code ("optimal"|"economy"|"comfort").
+_origin_place: если пользователь назвал город вылета, которого нет в списке кодов выше, — его название в
+именительном падеже (например «Магнитогорск»).
+_unknown_place: если пользователь назвал место (город, курорт, остров, страну, регион), которого нет в списке
+направлений выше, — его название в именительном падеже (например «Рейкьявик», «Италия», «Антарктида»).
 «без долгих перелётов» → max_flight_h 5.5. Не выдумывай значения."""
 
 
@@ -140,6 +179,8 @@ def _validate(d: dict) -> dict:
             ok[k] = v
         elif k == "_intent" and v in INTENTS:
             ok[k] = v
+        elif k in ("_unknown_place", "_origin_place") and isinstance(v, str) and v.strip():
+            ok[k] = v.strip()[:60]
         elif k == "_choice_code" and v in ("optimal", "economy", "comfort"):
             ok[k] = v
     return ok
@@ -149,8 +190,85 @@ def answer(question: str, facts: str) -> str | None:
     if not enabled():
         return None
     raw = _chat([
-        {"role": "system", "content": "Ты — дружелюбный тревел-агент Островка. Отвечай по-русски, кратко (3–6 предложений), "
-                                      "опирайся на факты ниже, не выдумывай цены и наличие. Факты:\n" + facts},
+        {"role": "system", "content": "Ты — дружелюбный тревел-агент. Отвечай по-русски, кратко (2–5 предложений), опирайся "
+                                      "только на факты ниже, не выдумывай цены, наличие и даты. Ты НЕ меняешь условия поездки "
+                                      "и ничего не бронируешь сам — это делает система, поэтому никогда не пиши «поменял», "
+                                      "«изменил», «забронировал». Если пользователь просит что-то изменить, а в фактах этого нет, "
+                                      "скажи, что не смог разобрать просьбу, и предложи сформулировать её короче. Не показывай "
+                                      "служебные коды и идентификаторы. Факты:\n" + facts},
         {"role": "user", "content": question},
     ], max_tokens=400, json_mode=False)
     return raw.strip() if raw else None
+
+
+PLACE_PROMPT = """Ты — справочник путешествий. Пользователь из России назвал место: «{q}».
+Верни ТОЛЬКО JSON со сведениями (реалистичные средние значения, без выдумок):
+{{
+ "kind": "place" — конкретный город/курорт/остров, куда можно поехать;
+         "region" — страна или большой регион (например «Италия», «Европа», «Карибы»);
+         "unreachable" — туда не ездят обычные туристы (Антарктида, Северный полюс, космос, зона войны),
+ "name": "название по-русски", "name_loc": "в Рейкьявике / на Крите", "name_acc": "в Рейкьявик / на Крит",
+ "name_gen": "родительный падеж для «из …»: Рейкьявика",
+ "country": "страна по-русски", "cc": "ISO-код страны из 2 букв",
+ "lat": широта, "lon": долгота, "iata": "код ближайшего аэропорта", "airport_km": км от аэропорта до центра,
+ "tz": смещение UTC зимой (число),
+ "types": подмножество ["beach","city","nature","ski"],
+ "tags": подмножество ["sea","warm","culture","food","party","quiet","romantic","nature","mountains","ski","shopping",
+          "wellness","diving","northern_lights","kids","budget","luxury","all_inclusive","surf","adventure"],
+ "air_max": [12 чисел — средний дневной максимум °C по месяцам с января],
+ "sea": [12 чисел — температура моря у берега] или null, если моря нет,
+ "rain_days": [12 чисел — дождливых дней в месяце],
+ "best_months": [лучшие месяцы для поездки], "ski_months": [], "swim_months": [],
+ "areas": [2–4 района для проживания: {{"name": "...", "airport_km": 20, "beach_m": 100 или null, "center_km": 1.5,
+          "vibe": подмножество ["family","quiet","lively","party","luxury","budget","city","culture","food","nature","ski"]}}],
+ "highlights": [5 конкретных мест и занятий],
+ "hotel_price_rub": цена ночи в номере на двоих 3–4* в рублях,
+ "daily_spend_rub": расходы на месте в день на человека в рублях,
+ "direct_flights_from_moscow": есть ли сейчас прямые рейсы из Москвы (true/false),
+ "visa_note": "визовый режим для граждан РФ, кратко",
+ "risks": {{"номер месяца": "сезонный риск: дожди, тайфуны, жара, закрытие отелей"}},
+ "suggest": для region и unreachable — 3–4 конкретных места-названия, куда реально поехать (для unreachable — откуда туда
+           отправляются или что ближе всего по духу), иначе [],
+ "note": одно предложение-пояснение для пользователя (особенно для region/unreachable)
+}}"""
+
+
+def place_card(query: str) -> dict | None:
+    """Сведения о любом месте мира от LLM (для направлений вне ручного каталога)."""
+    if not enabled():
+        return None
+    raw = _chat([{"role": "system", "content": "Отвечай только валидным JSON."},
+                 {"role": "user", "content": PLACE_PROMPT.format(q=query[:80])}], max_tokens=1600)
+    if not raw:
+        return None
+    m = re.search(r"\{.*\}", raw, re.S)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(0))
+    except json.JSONDecodeError:
+        log.warning("place_card: не JSON")
+        return None
+
+
+SUGGEST_PROMPT = """Ты — эксперт по путешествиям. Турист из России (вылет: {origin}) ищет поездку: {summary}.
+Предложи 5 конкретных мест в мире (город, курорт или остров — не страну), которые лучше всего подходят под запрос
+в эти даты, включая неочевидные. Учитывай сезон и погоду, визы и прямые рейсы для граждан РФ, бюджет и состав.
+Верни ТОЛЬКО JSON: {{"places": ["Название по-русски", ...]}}"""
+
+
+def suggest_places(summary: str, origin: str) -> list[str]:
+    """Идеи направлений со всего мира для запроса без конкретного места."""
+    if not enabled():
+        return []
+    raw = _chat([{"role": "system", "content": "Отвечай только валидным JSON."},
+                 {"role": "user", "content": SUGGEST_PROMPT.format(summary=summary[:400], origin=origin)}], max_tokens=300)
+    m = re.search(r"\{.*\}", raw or "", re.S)
+    if not m:
+        return []
+    try:
+        places = json.loads(m.group(0)).get("places", [])
+    except (json.JSONDecodeError, AttributeError):
+        return []
+    return [str(p).strip()[:60] for p in places if isinstance(p, str) and p.strip()][:5]
+

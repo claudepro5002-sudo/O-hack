@@ -9,14 +9,15 @@ from datetime import date, datetime, timedelta
 
 from . import inventory as inv
 from .data.destinations import DEST_BY_ID, DESTINATIONS, MONTH_GEN, Destination
-from .data.geo import ORIGIN_BY_CODE, ORIGIN_SAME_DEST, flight_minutes, haversine_km
+from .data.geo import ORIGIN_BY_CODE, ORIGIN_SAME_DEST, flight_minutes, haversine_km, hub_point
 from .state import TripRequest, today
 
 WEIGHTS = {
-    "price": {"price": 0.5, "hotel": 0.25, "transport": 0.18, "transfer": 0.07},
-    "balance": {"price": 0.34, "hotel": 0.36, "transport": 0.22, "transfer": 0.08},
-    "comfort": {"price": 0.15, "hotel": 0.5, "transport": 0.25, "transfer": 0.1},
-    "time": {"price": 0.25, "hotel": 0.25, "transport": 0.42, "transfer": 0.08},
+    # price — деньги, hotel — отель под вас, transport — удобство рейсов, time — время «от вылета до двери отеля»
+    "price": {"price": 0.65, "hotel": 0.17, "transport": 0.1, "time": 0.08},
+    "balance": {"price": 0.35, "hotel": 0.35, "transport": 0.18, "time": 0.12},
+    "comfort": {"price": 0.08, "hotel": 0.55, "transport": 0.25, "time": 0.12},
+    "time": {"price": 0.12, "hotel": 0.18, "transport": 0.15, "time": 0.55},
 }
 
 
@@ -46,7 +47,9 @@ def ddmm(d: date) -> str:
 
 
 def date_range_text(d1: date, d2: date) -> str:
-    if d1.month == d2.month:
+    if d1.year != d2.year and (d2 - d1).days > 60:
+        return f"{ddmm(d1)} {d1.year} – {ddmm(d2)} {d2.year}"
+    if d1.month == d2.month and d1.year == d2.year:
         return f"{d1.day}–{d2.day} {MONTH_GEN[d2.month - 1]}"
     return f"{ddmm(d1)} – {ddmm(d2)}"
 
@@ -109,7 +112,7 @@ def fastest_minutes(req: TripRequest, dest: Destination) -> tuple[int | None, st
         if dist >= 150:
             m = flight_minutes(dist)
             if origin.code not in dest.direct_from:
-                hub = ORIGIN_BY_CODE.get(dest.hub if dest.hub != origin.code else "MOW")
+                hub = hub_point(dest.hubs[0] if dest.hubs else dest.hub if dest.hub != origin.code else "MOW")
                 m = flight_minutes(haversine_km(origin.lat, origin.lon, hub.lat, hub.lon)) + \
                     flight_minutes(haversine_km(hub.lat, hub.lon, dest.lat, dest.lon)) + 90
             best = m
@@ -139,6 +142,9 @@ def score_transport(t: dict, req: TripRequest, all_opts: list[dict]) -> tuple[fl
         if not t["baggage_included"]:
             cons.append(f"тариф без багажа: докупил багаж (+{rub(t['bag_fee'])} за место)")
             s -= 0.04
+        if req.priority == "comfort" and t["lowcost"]:
+            s -= 0.45
+            cons.append("лоукост: тесные кресла, всё за доплату")
         if req.max_flight_h and t["duration_min"] > req.max_flight_h * 60:
             s -= 0.45
             cons.append(f"в пути {hours(t['duration_min'])} — больше вашего лимита {req.max_flight_h:g} ч")
@@ -306,8 +312,10 @@ def choose_transfer(opts: list[dict], req: TripRequest) -> dict | None:
             p *= 3
         if req.pets and o["kind"] in ("shuttle", "public"):
             p *= 3
-        if req.priority == "comfort" and o["kind"] == "private":
-            p *= 0.4
+        if req.priority == "comfort":
+            p *= 0.4 if o["kind"] in ("private", "seaplane") else 4 if o["kind"] in ("shuttle", "public") else 1
+        if req.priority == "time":
+            p *= 1 + o["duration_min"] / 30
         if req.priority in ("balance", "time") and o["kind"] in ("shuttle", "public"):
             p *= 1.6 if req.has_kids else 1.15
         if o["kind"] == "seaplane" and req.priority != "price":
@@ -375,17 +383,22 @@ def weather(dest: Destination, month: int) -> dict:
     return {"air": dest.air[i], "sea": dest.sea[i] if dest.sea else None, "rain_days": dest.rain[i]}
 
 
-def rank_destinations(req: TripRequest, visited: list[str] | None = None, limit: int = 4) -> tuple[list[dict], list[dict]]:
+def rank_destinations(req: TripRequest, visited: list[str] | None = None, limit: int = 4,
+                      extra: list[str] | None = None) -> tuple[list[dict], list[dict]]:
     visited = visited or []
     excluded: list[dict] = []
     scored: list[dict] = []
     month = req.month or (date.fromisoformat(req.date_from).month if req.date_from else ((today().month % 12) + 1))
     prefs = set(req.prefs)
     origin = req.origin or "MOW"
-    for d in DESTINATIONS:
+    pool = [DEST_BY_ID[i] for i in req.candidates if i in DEST_BY_ID] if req.candidates else list(DESTINATIONS)
+    if not req.candidates and extra:  # места, которые предложила LLM, соревнуются с каталогом на равных
+        known = {d.id for d in pool}
+        pool += [DEST_BY_ID[i] for i in extra if i not in known and i in DEST_BY_ID]
+    for d in pool:
         if ORIGIN_SAME_DEST.get(origin) == d.id or d.id in req.avoid or d.country in req.avoid:
             continue
-        if req.country and d.country != req.country and not (req.country == "Россия" and d.domestic):
+        if req.country and not req.candidates and d.country != req.country and not (req.country == "Россия" and d.domestic):
             continue
         reason = None
         fm, mode = fastest_minutes(req, d)
@@ -531,6 +544,11 @@ def rank_destinations(req: TripRequest, visited: list[str] | None = None, limit:
             s += 0.4
         if d.id in visited:
             s -= 0.25
+        if extra and d.id in extra and d.source == "llm":
+            s += 0.5
+        if d.id in req.similar_to:
+            s += 2.2 - 0.2 * req.similar_to.index(d.id)
+            why.insert(0, f"ближе всего к «{req.similar_label}»" if req.similar_label else "похоже на то, что вы искали")
         if req.country:
             s += 0.2
         scored.append({"dest": d, "score": s, "why": why, "cons": cons, "risks": risks, "weather": w, "travel": travel})
@@ -636,6 +654,7 @@ def _dest_card(item: dict, req: TripRequest) -> dict:
         "risks": _uniq(item["risks"])[:3],
         "highlights": list(d.highlights[:3]),
         "kinds": list(d.kinds),
+        "ai": d.source == "llm",
     }
 
 
@@ -727,11 +746,15 @@ def build_plan(req: TripRequest, dest_id: str, pinned: dict | None = None, prev:
 
     top_out = pick(sorted(outs, key=lambda t: -t["fit"]), "out_id")[:4]
     top_out += [t for t in sorted(outs, key=lambda t: t["total_price"])[:2] if t not in top_out]
+    top_out += [t for t in sorted(outs, key=lambda t: t["duration_min"])[:1] if t not in top_out]
     top_back = pick(sorted(backs, key=lambda t: -t["fit"]), "back_id")[:4]
     top_back += [t for t in sorted(backs, key=lambda t: t["total_price"])[:2] if t not in top_back]
+    top_back += [t for t in sorted(backs, key=lambda t: t["duration_min"])[:1] if t not in top_back]
     top_hotels = pick(hotels, "hotel_id")[:7]
-    cheap_h = sorted(hotels, key=lambda h: h["base_price"])[:2]
-    top_hotels += [h for h in cheap_h if h not in top_hotels]
+    extra_h = sorted(hotels, key=lambda h: h["base_price"])[:2]  # самые дешёвые
+    extra_h += sorted(hotels, key=lambda h: (-h["stars"], -h["rating"]))[:2]  # самые классные
+    extra_h += sorted(hotels, key=lambda h: h["airport_km"])[:2]  # ближе всего к аэропорту
+    top_hotels += [h for h in extra_h if h not in top_hotels]
 
     prev_ids = {}
     if prev and prev.get("bundles"):
@@ -754,6 +777,11 @@ def build_plan(req: TripRequest, dest_id: str, pinned: dict | None = None, prev:
     trace.append({"tool": "search_transfers", "args": {"dest": dest.name}, "result": "подобраны трансферы для каждого отеля"})
 
     cheapest = min(c["total"] for c in combos)
+    for c in combos:
+        c["door_min"] = (c["out"]["duration_min"] + c["back"]["duration_min"] +
+                         (c["transfer_in"] or {"duration_min": 60})["duration_min"] +
+                         (c["transfer_out"] or {"duration_min": 60})["duration_min"])
+    fastest_door = min(c["door_min"] for c in combos)
     w = WEIGHTS.get(req.priority, WEIGHTS["balance"])
     for c in combos:
         price_s = cheapest / c["total"]
@@ -761,9 +789,17 @@ def build_plan(req: TripRequest, dest_id: str, pinned: dict | None = None, prev:
             price_s -= min(1.0, (c["total"] / req.budget - 1) * 2.5)
         tr_s = (c["out"]["fit"] + c["back"]["fit"]) / 2
         tf_s = c["transfer_fit"]
+        time_s = fastest_door / c["door_min"]
+        h = c["hotel"]
+        hotel_s = h["fit"]
+        if req.priority == "comfort":  # комфорт — это ещё и класс отеля, гибкий тариф и встреча в аэропорту
+            hotel_s += (h["stars"] - 3) * 0.12 + (h["rating"] - 8) * 0.08 + (0.08 if c["stay"]["rate"]["refundable"] else 0)
+            tr_s += 0.1 * tf_s
+        if req.priority == "time":
+            time_s -= min(0.3, h["airport_km"] / 300)
         pen = sum(0.5 if i["level"] == "error" else 0.04 if i["level"] == "warn" else 0 for i in c["issues"])
-        c["utility"] = round(w["price"] * price_s + w["hotel"] * c["hotel"]["fit"] + w["transport"] * tr_s +
-                             w["transfer"] * tf_s - pen + c.pop("_sticky", 0), 4)
+        c["utility"] = round(w["price"] * price_s + w["hotel"] * hotel_s + w["transport"] * tr_s +
+                             w["time"] * time_s - pen + c.pop("_sticky", 0), 4)
         c["quality"] = c["hotel"]["fit"] * 0.6 + tr_s * 0.3 + tf_s * 0.1 - pen
         c["blocking"] = any(i["level"] == "error" for i in c["issues"])
 
@@ -1132,6 +1168,15 @@ def itinerary(b: dict, req: TripRequest) -> list[dict]:
     co = date.fromisoformat(stay["check_out"])
     cur = arr.date() + timedelta(days=1)
     i = 0
+    if (co - cur).days > 14:  # длинная поездка: первые дни по идеям, остальное одной строкой
+        for k in range(len(ideas)):
+            days.append({"date": cur.isoformat(), "title": "Идея на день", "items": [ideas[k]]})
+            cur += timedelta(days=1)
+        rest = (co - cur).days
+        if rest > 0:
+            days.append({"date": cur.isoformat(), "title": f"Ещё {rest} дн. — свободная программа",
+                         "items": [f"с {ddmm(cur)} по {ddmm(co - timedelta(days=1))}: отдых, поездки по окрестностям"]})
+        cur = co
     while cur < co:
         free = i % 2 == 1 and "beach" in dest.kinds
         days.append({"date": cur.isoformat(), "title": "Свободный день" if free else "Идея на день",

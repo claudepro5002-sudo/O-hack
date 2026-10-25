@@ -69,3 +69,12 @@ def test_skiing_does_not_match_kata():
 
 def test_names():
     assert names_from_text("Иван Петров, Мария Петрова и Петя Петров") == ["Иван Петров", "Мария Петрова", "Петя Петров"]
+
+
+def test_dates_with_years_and_long_ranges():
+    assert parse("с 1 июня 2027 по 1 июня 2028")["date_to"] == "2028-06-01"
+    assert parse("с 1 июня по 1 июня следующего года")["date_to"] == "2028-06-01"
+    u = parse("с 30 по 3 января")
+    assert (u["date_from"], u["date_to"]) == ("2026-12-30", "2027-01-03")
+    assert parse("с 01.06.2027 по 01.06.2028")["date_to"] == "2028-06-01"
+    assert parse("1-10 июня, бюджет 2027 рублей")["date_to"] == "2027-06-10"

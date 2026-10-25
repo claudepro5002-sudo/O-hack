@@ -31,6 +31,7 @@ def conn() -> sqlite3.Connection:
                                              created REAL, updated REAL);
         CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, user_id TEXT, type TEXT,
                                            ts REAL, data TEXT);
+        CREATE TABLE IF NOT EXISTS places (key TEXT PRIMARY KEY, data TEXT, updated REAL);
         CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
         CREATE INDEX IF NOT EXISTS idx_bookings_user ON bookings(user_id);
         CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
@@ -126,3 +127,17 @@ def events(type_: str | None = None) -> list[dict]:
         else:
             rows = conn().execute("SELECT * FROM events").fetchall()
     return [dict(r) for r in rows]
+
+
+def get_place(key: str) -> dict | None:
+    with _lock:
+        row = conn().execute("SELECT data FROM places WHERE key=?", (key,)).fetchone()
+    return json.loads(row["data"]) if row else None
+
+
+def save_place(key: str, data: dict) -> None:
+    with _lock:
+        c = conn()
+        c.execute("INSERT INTO places(key, data, updated) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET "
+                  "data=excluded.data, updated=excluded.updated", (key, json.dumps(data, ensure_ascii=False), time.time()))
+        c.commit()

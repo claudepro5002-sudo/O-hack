@@ -14,6 +14,7 @@ PREF_LABELS = {
     "mountains": "горы", "ski": "горные лыжи", "shopping": "шопинг", "wellness": "СПА и оздоровление",
     "diving": "дайвинг и снорклинг", "northern_lights": "северное сияние", "kids_fun": "развлечения для детей",
     "city": "городской отдых", "surf": "сёрфинг", "adventure": "приключения",
+    "pool": "бассейн", "kitchen": "кухня в номере", "dry": "без дождей", "mild": "без жары",
 }
 
 PRIORITY_LABELS = {"price": "Важнее цена", "balance": "Баланс", "comfort": "Важнее комфорт", "time": "Меньше времени в пути"}
@@ -35,6 +36,9 @@ class TripRequest(BaseModel):
     destination: str | None = None
     country: str | None = None
     avoid: list[str] = Field(default_factory=list)
+    similar_to: list[str] = Field(default_factory=list)  # аналоги места, которого нет в каталоге
+    similar_label: str | None = None
+    candidates: list[str] = Field(default_factory=list)  # конкретные места региона, которые подобрала LLM
     date_from: str | None = None
     date_to: str | None = None
     month: int | None = None
@@ -102,4 +106,5 @@ class SessionState(BaseModel):
     turns: int = 0
     replans: int = 0
     memory_applied: list[str] = Field(default_factory=list)
+    unknown_place: dict | None = None  # место вне каталога, о котором нужно честно сказать
     awaiting: str | None = None  # что агент ждёт от пользователя (например, travelers_names)

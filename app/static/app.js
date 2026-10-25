@@ -74,21 +74,60 @@
     $("#chips").innerHTML = "";
     scrollDown();
   }
-  function addAgent(m, restoring) {
-    if (!restoring) { feed.push({ role: "agent", m }); persist(); }
-    const el = h(`<div class="msg agent"><div class="bubble">${md(m.text)}</div></div>`);
+  const KINDS = ["plan", "cart", "destinations"];
+  const kindOf = (m) => ((m.blocks || []).find((b) => KINDS.includes(b.type)) || {}).type || "";
+  function buildAgent(m, idx) {
+    const el = h(`<div class="msg agent" data-feed="${idx}" data-kind="${kindOf(m)}"><div class="bubble">${md(m.text)}</div></div>`);
     (m.blocks || []).forEach((b) => { const node = renderBlock(b); if (node) el.appendChild(node); });
-    $("#messages").appendChild(el);
+    return el;
+  }
+  function addAgent(m, restoring, idx) {
+    if (!restoring) { feed.push({ role: "agent", m }); persist(); idx = feed.length - 1; }
+    $("#messages").appendChild(buildAgent(m, idx));
     renderChips(m.chips || []);
     scrollDown();
   }
+  // Тихое обновление: заменяем последнюю карточку того же вида, в ленту ничего не добавляем
+  function replaceAgent(m) {
+    const kind = kindOf(m);
+    if (!kind || !m.text) return;
+    const all = document.querySelectorAll(`.msg.agent[data-kind="${kind}"]`);
+    const old = all[all.length - 1];
+    if (!old) return;
+    const idx = +old.dataset.feed;
+    const el = buildAgent(m, idx);
+    const wasLast = !old.nextElementSibling;
+    // сохраняем раскрытые блоки («Сравнить отели», «Сравнить маршруты», проверки) — по порядку и по заголовку
+    const openNow = [...old.querySelectorAll("details")].map((d) => ({ open: d.open, title: summaryKey(d) }));
+    const fresh = [...el.querySelectorAll("details")];
+    fresh.forEach((d, i) => {
+      const same = openNow.find((x) => x.title === summaryKey(d)) || openNow[i];
+      if (same && same.open) d.open = true;
+    });
+    old.replaceWith(el);
+    if (feed[idx]) { feed[idx] = { role: "agent", m }; persist(); }
+    if (wasLast) renderChips(m.chips || []);
+  }
+  const summaryKey = (d) => ((d.querySelector("summary") || {}).textContent || "").replace(/\(\d+\)/, "").trim();
+  async function tweak(action) {
+    if (busy) return;
+    busy = true; document.body.classList.add("updating");
+    try {
+      const r = await api("/api/chat", { session_id: sessionId, user_id: userId, action: { ...action, silent: true } });
+      r.messages.forEach(replaceAgent);
+      renderSummary(r.summary);
+      renderTrace(r.trace || [], r.messages[0] && r.messages[0].elapsed_ms);
+    } catch (e) { /* настройка не применилась — состояние на сервере не изменилось */ }
+    finally { busy = false; document.body.classList.remove("updating"); }
+  }
+  const isTweak = (a) => a && (["set_rate", "cart_transfer", "toggle_addon"].includes(a.type) || (a.type === "set" && a.key === "priority"));
   function scrollDown() { const box = $("#messages"); requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; }); }
 
   function renderChips(chips) {
     const box = $("#chips"); box.innerHTML = "";
     chips.forEach((c) => {
       const b = h(`<button class="chip">${esc(c.label)}</button>`);
-      b.onclick = () => (c.action ? send(null, c.action, c.label) : send(c.message, null, c.label));
+      b.onclick = () => (isTweak(c.action) ? tweak(c.action) : c.action ? send(null, c.action, c.label) : send(c.message, null, c.label));
       box.appendChild(b);
     });
   }
@@ -197,7 +236,7 @@
     const hd = h(`<details><summary>Сравнить отели (${p.hotels.length})</summary></details>`);
     hd.appendChild(hotelsTable(p.hotels, p.excluded_hotels, true));
     wrap.appendChild(hd);
-    const fd = h(`<details><summary>Сравнить рейсы и поезда</summary></details>`);
+    const fd = h(`<details><summary>Сравнить маршруты</summary></details>`);
     fd.appendChild(flightsBlock(p.flights_out, p.flights_back, true));
     wrap.appendChild(fd);
     return wrap;
@@ -245,7 +284,7 @@
   }
 
   function weightsBlock(w) {
-    const parts = [["Цена", w.price, "#0a7cff"], ["Отель под вас", w.hotel, "#16a06b"], ["Дорога", w.transport, "#6b4de6"], ["Трансфер", w.transfer, "#c77800"]];
+    const parts = [["Цена", w.price, "#0a7cff"], ["Отель под вас", w.hotel, "#16a06b"], ["Удобство рейсов", w.transport, "#6b4de6"], ["Время в пути", w.time, "#c77800"]];
     return h(`<div class="weights">${parts.map(([l, v, c]) => `<div style="width:${v * 100}%;background:${c}">${v >= 0.12 ? `${l} ${Math.round(v * 100)}%` : ""}</div>`).join("")}</div>`);
   }
 
@@ -261,12 +300,12 @@
       const row = h(`<div class="cart-item"><div><div class="t">${esc(it.title)}</div><div class="d">${esc(it.details)}</div></div><div class="p">${rub(it.price)}</div></div>`);
       if (it.kind === "hotel" && it.rates && it.rates.length > 1) {
         const sel = h(`<select aria-label="Тариф">${it.rates.map((r) => `<option value="${r.code}" ${r.code === it.rate_code ? "selected" : ""}>${esc(r.name)} — ${rub(r.price)}</option>`).join("")}</select>`);
-        sel.onchange = () => act({ type: "set_rate", code: sel.value }, `Тариф: ${sel.options[sel.selectedIndex].text}`);
+        sel.onchange = () => tweak({ type: "set_rate", code: sel.value });
         row.appendChild(sel);
       }
       if (it.kind === "transfer" && it.options) {
         const sel = h(`<select aria-label="Трансфер">${it.options.map((o) => `<option value="${o.id}" ${o.available ? "" : "disabled"} ${it.title.includes(o.name) ? "selected" : ""}>${esc(o.name)} — ${rub(o.price)}, ~${dur(o.duration_min)}${o.available ? "" : " (не работает в это время)"}</option>`).join("")}<option value="none">Без трансфера</option></select>`);
-        sel.onchange = () => act({ type: "cart_transfer", dir: it.dir, id: sel.value }, `Трансфер: ${sel.options[sel.selectedIndex].text}`);
+        sel.onchange = () => tweak({ type: "cart_transfer", dir: it.dir, id: sel.value });
         row.appendChild(sel);
       }
       items.appendChild(row);
@@ -274,7 +313,7 @@
     const addons = $(".addons", card);
     c.addons.forEach((a) => {
       const row = h(`<label class="addon"><input type="checkbox" ${a.selected ? "checked" : ""}><span>${esc(a.title)} — <b>${a.price ? rub(a.price) : "бесплатно"}</b><br><span class="muted">${esc(a.note)}</span></span></label>`);
-      $("input", row).onchange = () => act({ type: "toggle_addon", addon: a.code }, `${a.selected ? "Убрать" : "Добавить"}: ${a.title}`);
+      $("input", row).onchange = () => tweak({ type: "toggle_addon", addon: a.code });
       addons.appendChild(row);
     });
     const checks = $(".checks", card);
@@ -283,9 +322,9 @@
       const issue = [...c.issues].sort((a, b) => ["error", "warn", "ok", "info"].indexOf(a.level) - ["error", "warn", "ok", "info"].indexOf(b.level))[+btn.dataset.fix];
       btn.onclick = () => {
         const fx = issue.fix.action;
-        if (fx === "add_transfer") return act({ type: "cart_transfer", dir: "in", id: (c.items.find((x) => x.kind === "transfer") || { options: [{}] }).options[0].id }, issue.fix.label);
+        if (fx === "add_transfer") return tweak({ type: "cart_transfer", dir: "in", id: (c.items.find((x) => x.kind === "transfer") || { options: [{}] }).options[0].id });
         const code = fx === "early_checkin" && !c.addons.some((a) => a.code === "early_checkin") ? "night_before" : fx;
-        act({ type: "toggle_addon", addon: code }, issue.fix.label);
+        tweak({ type: "toggle_addon", addon: code });
       };
     });
     $(".timeline", card).innerHTML = c.timeline.map((d) => `<div class="day"><div class="dt">${dm(d.date)}</div><div><b>${esc(d.title)}</b><br>${d.items.map(esc).join("<br>")}</div></div>`).join("");
@@ -336,20 +375,40 @@
   }
 
   // ------------------------------------------------------------------ панель
-  const EDIT_HINTS = { origin: "Вылет из ", destination: "Хочу в ", country: "Хочу в ", dates: "Даты: ", nights: "На ", party: "Едем: ",
-    budget: "Бюджет до ", budget_level: "Бюджет до ", pets: "Без питомца" };
+  // ------------------------------------------------------------------ форма «Что я понял»
+  let formDirty = false;
+  function fillForm(f) {
+    if (!f || formDirty) return;
+    const form = $("#tripForm");
+    const set = (name, v) => { const el = form.elements[name]; if (el && document.activeElement !== el) el.value = v ?? ""; };
+    set("origin", f.origin); set("destination", f.destination);
+    set("date_from", f.date_from); set("date_to", f.date_to);
+    set("adults", f.adults); set("children", f.children);
+  }
+  function formSummary(v) {
+    const bits = [];
+    if (v.origin) bits.push(`откуда: ${v.origin}`);
+    bits.push(v.destination ? v.destination : "куда — подобрать");
+    if (v.date_from) bits.push(`${dm(v.date_from)}${v.date_to ? " – " + dm(v.date_to) : ""}`);
+    if (v.adults) bits.push(`${v.adults} взр.` + (+v.children ? `, детей: ${v.children}` : ""));
+    return "Мои параметры: " + bits.join("; ");
+  }
+  function initForm() {
+    const form = $("#tripForm");
+    form.addEventListener("input", (e) => {
+      formDirty = true;
+      const n = e.target.name;
+    });
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const values = Object.fromEntries(new FormData(form).entries());
+      formDirty = false;
+      closePanel();
+      send(null, { type: "apply_form", values }, formSummary(values));
+    };
+  }
   function renderSummary(s) {
-    const box = $("#slots");
-    if (!s.slots.length) { box.innerHTML = `<div class="muted">Пока ничего — расскажите о поездке.</div>`; }
-    else {
-      box.innerHTML = "";
-      s.slots.forEach((sl) => {
-        const src = { user: ["вы", "src-user"], memory: ["из памяти", "src-memory"], assumed: ["допущение", "src-assumed"], agent: ["подобрал агент", "src-agent"] }[sl.source] || ["", ""];
-        const row = h(`<div class="slot ${sl.editable ? "editable" : ""}"><span class="slot-label">${esc(sl.label)}</span><span class="slot-value">${esc(sl.value)}${src[0] && sl.source !== "user" ? `<span class="src ${src[1]}">${src[0]}</span>` : ""}</span></div>`);
-        if (sl.editable) row.onclick = () => { const inp = $("#input"); inp.value = EDIT_HINTS[sl.key] || ""; inp.focus(); closePanel(); };
-        box.appendChild(row);
-      });
-    }
+    fillForm(s.form);
     document.querySelectorAll("#priority button").forEach((b) => b.classList.toggle("on", b.dataset.p === s.priority));
     const cc = $("#cartCard");
     if (s.cart) { cc.hidden = false; $("#cartMini").innerHTML = `<div>${esc(s.cart.title)}</div><div class="price">${rub(s.cart.total)}</div>`; }
@@ -435,9 +494,14 @@
     input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#composer").requestSubmit(); } });
     input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 140) + "px"; });
     $("#newTrip").onclick = () => { closePanel(); if (sessionId) send(null, { type: "reset" }, "Новая поездка"); else newSession(); };
-    document.querySelectorAll("#priority button").forEach((b) => b.onclick = () => act({ type: "set", key: "priority", value: b.dataset.p }, `Приоритет: ${b.textContent}`));
+    document.querySelectorAll("#priority button").forEach((b) => b.onclick = () => {
+      if (b.classList.contains("on")) return;
+      document.querySelectorAll("#priority button").forEach((x) => x.classList.toggle("on", x === b));
+      tweak({ type: "set", key: "priority", value: b.dataset.p });
+    });
     document.querySelectorAll("[data-open]").forEach((b) => b.onclick = () => { closePanel(); ({ trips: openTrips, memory: openMemory, metrics: openMetrics })[b.dataset.open](); });
     $("#modalClose").onclick = closeModal;
+    initForm();
     $("#modal").onclick = (e) => { if (e.target.id === "modal") closeModal(); };
     $("#panelToggle").onclick = () => $("#panel").classList.toggle("open");
     document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closePanel(); } });
@@ -449,7 +513,7 @@
         const info = await api(`/api/session/${encodeURIComponent(sessionId)}`);
         if (raw && info.session_id === sessionId) {
           feed = JSON.parse(raw);
-          feed.forEach((x) => (x.role === "user" ? $("#messages").appendChild(h(`<div class="msg user"><div class="bubble">${esc(x.text)}</div></div>`)) : addAgent(x.m, true)));
+          feed.forEach((x, i) => (x.role === "user" ? $("#messages").appendChild(h(`<div class="msg user"><div class="bubble">${esc(x.text)}</div></div>`)) : addAgent(x.m, true, i)));
           renderSummary(info.summary);
           restored = true;
         }

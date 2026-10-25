@@ -15,6 +15,7 @@ COPY --from=build /install /usr/local
 WORKDIR /app
 COPY --chown=app:app app ./app
 COPY --chown=app:app eval ./eval
+COPY --chown=app:app run.py ./
 USER app
 EXPOSE 8080
 VOLUME ["/data"]

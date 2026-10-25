@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta
 from functools import cache
 
 from .data.destinations import DEST_BY_ID, Destination
-from .data.geo import ORIGIN_BY_CODE, flight_minutes, haversine_km
+from .data.geo import HUB_AIRLINES, ORIGIN_BY_CODE, flight_minutes, haversine_km, hub_point
 
 
 def rng(*parts) -> random.Random:
@@ -350,19 +350,21 @@ def search_flights(origin_code: str, dest_id: str, day: date, direction: str = "
 
     options = []
     n_direct = r.randint(3, 5) if direct else 0
-    slots = r.sample(DEP_SLOTS, k=min(len(DEP_SLOTS), n_direct + 2))
+    foreign_hubs = list(dest.hubs) if not direct and dest.hubs else []
+    slots = r.sample(DEP_SLOTS, k=min(len(DEP_SLOTS), n_direct + (4 if foreign_hubs else 2)))
     hub = dest.hub if dest.hub != origin_code else "MOW"
     for idx, (hh, mm) in enumerate(slots):
         is_direct = idx < n_direct
-        if not is_direct and (hub == origin_code or _hub_is_dest(hub, dest)):
+        leg_hub = foreign_hubs[idx % len(foreign_hubs)] if foreign_hubs and not is_direct else hub
+        if not is_direct and (leg_hub == origin_code or _hub_is_dest(leg_hub, dest)):
             continue
-        code, airline, lowcost, pet_cabin = r.choice(pool)
+        code, airline, lowcost, pet_cabin = r.choice(HUB_AIRLINES[leg_hub] if leg_hub in HUB_AIRLINES and not is_direct else pool)
         dep = datetime(day.year, day.month, day.day, hh, mm)
         if is_direct:
             dur = flight_minutes(dist) + r.randint(-10, 15)
             stops, via, layover = 0, None, 0
         else:
-            h = ORIGIN_BY_CODE[hub]
+            h = hub_point(leg_hub)
             leg1 = flight_minutes(haversine_km(o.lat, o.lon, h.lat, h.lon))
             leg2 = flight_minutes(haversine_km(h.lat, h.lon, dest.lat, dest.lon))
             layover = r.choice([75, 110, 160, 240, 340, 480])
@@ -401,8 +403,8 @@ def search_flights(origin_code: str, dest_id: str, day: date, direction: str = "
 
 
 def _hub_is_dest(hub: str, dest: Destination) -> bool:
-    o = ORIGIN_BY_CODE.get(hub)
-    return o is not None and haversine_km(o.lat, o.lon, dest.lat, dest.lon) < 150
+    o = hub_point(hub)
+    return haversine_km(o.lat, o.lon, dest.lat, dest.lon) < 150
 
 
 def pax_price(item: dict, adults: int, children_ages: list[int], add_bags: bool = True) -> int:

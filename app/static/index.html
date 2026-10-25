@@ -14,7 +14,6 @@
     <span class="logo">◉</span>
     <span class="brand-name">островок</span>
     <span class="brand-sub">трип-агент</span>
-    <span class="badge-mock" title="Отели, рейсы и цены — синтетические данные, оплата имитируется">прототип · демо-данные</span>
   </div>
   <nav class="top-actions">
     <button class="ghost" data-open="trips">Мои поездки</button>
@@ -42,9 +41,20 @@
       <button class="ghost" data-open="metrics">Метрики</button>
     </div>
     <div class="panel-card">
-      <div class="panel-title">Что я понял <span class="hint">нажмите, чтобы поправить</span></div>
-      <div id="slots" class="slots"><div class="muted">Пока ничего — расскажите о поездке.</div></div>
-      <div class="legend"><span class="src src-user">вы</span><span class="src src-memory">из памяти</span><span class="src src-assumed">допущение</span></div>
+      <div class="panel-title">Что я понял <span class="hint">поправьте и нажмите «Применить»</span></div>
+      <form id="tripForm" class="trip-form" autocomplete="off">
+        <label>Откуда<input name="origin" placeholder="Москва"></label>
+        <label>Куда<input name="destination" placeholder="подобрать за меня"></label>
+        <div class="row2">
+          <label>С<input type="date" name="date_from"></label>
+          <label>По<input type="date" name="date_to"></label>
+        </div>
+        <div class="row2">
+          <label>Взрослых<input type="number" name="adults" min="1" max="12" placeholder="2"></label>
+          <label>Детей<input type="number" name="children" min="0" max="10" placeholder="0"></label>
+        </div>
+        <button class="primary" type="submit">Применить</button>
+      </form>
     </div>
     <div class="panel-card">
       <div class="panel-title">Что важнее</div>

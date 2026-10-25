@@ -10,21 +10,34 @@
 """
 from __future__ import annotations
 
+import contextvars
 import random
+import re
 import time
 from datetime import date, datetime, timedelta
 
+from . import dynamic, llm, nlu, planner, store
 from . import inventory as inv
-from . import llm, nlu, planner, store
 from .data.destinations import DEST_BY_ID, MONTH_LOC, MONTH_NAMES
-from .data.geo import ORIGIN_BY_CODE
+from .data.geo import ORIGIN_BY_CODE, ORIGINS
 from .planner import date_range_text, ddmm, deg, hours, rub
 from .state import PREF_LABELS, PRIORITY_LABELS, SessionState, TripRequest, today
 
 REPLAN_KEYS = {"date_from", "date_to", "month", "nights", "adults", "children_ages", "children_pending", "pets", "budget",
                "budget_level", "prefs", "meal", "free_cancel", "direct_only", "max_flight_h", "transport", "stars_min",
                "beach_close", "center_close", "priority", "flight_time_pref", "origin", "accessible", "visa_free"}
+# «Тихий» ход: пользователь переключил настройку (приоритет, тариф, допы) — карточку
+# обновляем на месте, без реплики в чате и без сообщения «я переключил».
+SILENT: contextvars.ContextVar[bool] = contextvars.ContextVar("silent", default=False)
+
 POSTSALE = {"early_checkin", "late_checkout", "reminders", "cancel_booking", "change_booking", "add_transfer"}
+
+
+def plural(n: int, one: str, few: str, many: str) -> str:
+    n = abs(n) % 100
+    if 11 <= n <= 14:
+        return many
+    return one if n % 10 == 1 else few if 2 <= n % 10 <= 4 else many
 
 
 def reply(text: str, blocks: list | None = None, chips: list | None = None) -> dict:
@@ -45,6 +58,7 @@ class Turn:
 
     def __init__(self):
         self.trace: list[dict] = []
+        self.notes: list[str] = []  # пояснения, которые нужно показать пользователю в начале ответа
         self.t0 = time.time()
 
     def think(self, text: str):
@@ -146,27 +160,49 @@ def welcome(state: SessionState) -> dict:
 
 # ====================================================================== разбор
 
-def merge_updates(rule: dict, llm_upd: dict | None) -> dict:
+def mentioned(dest_id: str, text: str) -> bool:
+    """Упомянуто ли направление каталога в тексте (защита от «Антарктида» → «Анталья» у LLM)."""
+    d = DEST_BY_ID.get(dest_id)
+    if d is None:
+        return False
+    t = nlu.norm(text)
+    stems = [a.strip() for a in d.aliases if len(a.strip()) >= 3] + [nlu.norm(d.name)[:5]]
+    return any(re.search(r"(?<![а-я])" + re.escape(st), t) for st in stems)
+
+
+def merge_updates(rule: dict, llm_upd: dict | None, text: str = "") -> dict:
     if not llm_upd:
         return rule
+    llm_upd = dict(llm_upd)
+    dest = llm_upd.get("destination")
+    rules_saw_place = bool(rule.get("destination") or rule.get("_unknown_place") or rule.get("country"))
+    if dest and dest != rule.get("destination") and text and rules_saw_place and not mentioned(dest, text):
+        # в сообщении есть другое место (например, «Антарктида»), а LLM подставила похожее из каталога («Анталья»)
+        llm_upd.pop("destination")
     out = dict(rule)
+    rule_dates = any(k in rule for k in ("date_from", "date_to"))
     for k, v in llm_upd.items():
+        if rule_dates and k in ("date_from", "date_to", "month", "year", "nights"):
+            continue  # явные даты правила разбирают детерминированно — LLM их не перебивает
         if k in ("prefs", "avoid"):
             out[k] = sorted(set(out.get(k, [])) | set(v))
         elif k == "_intent" and rule.get("_intent") in ("choose_book", "shift_dates", "extend") and v != rule.get("_intent"):
             continue
         else:
             out[k] = v
+    if "children_ages" in llm_upd and "children_pending" not in llm_upd:
+        out["children_pending"] = 0  # LLM назвала возрасты всех детей
     return out
 
 
 def context_text(state: SessionState) -> str:
+    """Состояние для LLM — только человеческие названия, без внутренних кодов."""
     r = state.req
     bits = []
-    if r.destination:
-        bits.append(f"направление {r.destination}")
-    if r.origin:
-        bits.append(f"вылет {r.origin}")
+    if r.destination and r.destination in DEST_BY_ID:
+        bits.append(f"направление {DEST_BY_ID[r.destination].name}")
+    if r.origin and r.origin in ORIGIN_BY_CODE:
+        bits.append(f"вылет из {ORIGIN_BY_CODE[r.origin].name_gen}")
     if r.date_from:
         bits.append(f"даты {r.date_from}..{r.date_to or ''}")
     elif r.month:
@@ -174,7 +210,7 @@ def context_text(state: SessionState) -> str:
     if r.adults:
         bits.append(f"взрослых {r.adults}, дети {r.children_ages}")
     if state.dest_options:
-        bits.append("предложены направления: " + ", ".join(f"{i + 1}) {d['dest_id']}" for i, d in enumerate(state.dest_options)))
+        bits.append("предложены направления: " + ", ".join(f"{i + 1}) {d['name']}" for i, d in enumerate(state.dest_options)))
     if state.awaiting:
         bits.append(f"агент ждёт: {state.awaiting}")
     return "; ".join(bits) or "ничего"
@@ -188,6 +224,58 @@ def apply_updates(state: SessionState, upd: dict, turn: Turn) -> set[str]:
     adults_assumed = upd.pop("_adults_assumed", False)
     upd.pop("_open_destination", None)
     kids_unknown = upd.pop("_kids_count_unknown", False)
+    new_ages = upd.get("children_ages")
+    if (state.awaiting == "children_ages" and r.children_ages and r.children_pending and new_ages
+            and len(new_ages) <= r.children_pending and not upd.get("children_pending")):
+        # спрашивали возраст только новых детей — дополняем, а не заменяем известных
+        upd["children_ages"] = r.children_ages + new_ages
+        upd["children_pending"] = r.children_pending - len(new_ages)
+    gateway_note = upd.pop("_gateway_note", None)
+    if gateway_note:
+        turn.notes.append("🧭 " + gateway_note)
+        upd.pop("_unknown_place", None)  # место известно через «ворота», искать его в LLM не нужно
+    origin_place, origin_strong = upd.pop("_origin_place", None), upd.pop("_origin_strong", True)
+    if origin_place and "origin" not in upd:
+        code = dynamic.origin(origin_place) if llm.enabled() else None
+        if code:
+            turn.tool("llm_place_card", {"origin": origin_place}, f"город вылета: {ORIGIN_BY_CODE[code].name}")
+            upd["origin"] = code
+        elif origin_strong:
+            names = ", ".join(o.name for o in ORIGINS)
+            turn.notes.append(f"Город вылета «{origin_place.capitalize()}» я пока не знаю — умею считать вылет из: {names}. "
+                              f"Напишите ближайший из них (например, «вылет из Екатеринбурга»).")
+    unknown = upd.pop("_unknown_place", None)
+    if isinstance(unknown, str):
+        unknown = {"name": unknown, "prefs": []}
+    if unknown and "destination" not in upd and llm.enabled():
+        # LLM знает любое место: просим карточку места и превращаем её в направление
+        query = unknown.get("query") or unknown["name"]
+        res = dynamic.resolve(query)
+        if res and res["kind"] == "place":
+            turn.tool("llm_place_card", {"place": query}, f"направление: {DEST_BY_ID[res['dest_id']].name}")
+            upd["destination"] = res["dest_id"]
+            unknown = None
+        elif res and res["dest_ids"]:
+            turn.tool("llm_place_card", {"place": query}, f"{res['kind']}: варианты — "
+                      + ", ".join(DEST_BY_ID[i].name for i in res["dest_ids"]))
+            state.unknown_place = {"name": res["label"], "note": res["note"], "kind": res["kind"], "prefs": []}
+            r.candidates, r.similar_to, r.similar_label = res["dest_ids"], [], None
+            r.destination, r.country = None, None
+            unknown = None
+    if unknown and "destination" not in upd:
+        state.unknown_place = unknown
+        upd["prefs"] = sorted(set(upd.get("prefs", [])) | set(unknown["prefs"]))
+        r.similar_to, r.similar_label = list(unknown.get("similar", [])), unknown["name"]
+        if r.destination:  # пользователь назвал новое место — прежнее направление больше не актуально
+            r.destination, r.country, r.candidates = None, None, []
+            changed.add("destination")
+        turn.think(f"«{unknown['name']}» нет в каталоге — подберу похожее по духу: "
+                   + ", ".join(PREF_LABELS.get(p, p) for p in unknown["prefs"]))
+    elif "destination" in upd:
+        state.unknown_place = None
+        r.similar_to, r.similar_label, r.candidates = [], None, []
+    if "country" in upd:
+        r.candidates = []
     for k, v in list(upd.items()):
         if k.startswith("_") or k not in nlu.SLOT_KEYS:
             continue
@@ -233,6 +321,10 @@ def apply_updates(state: SessionState, upd: dict, turn: Turn) -> set[str]:
         r.nights_source = "user"
         if r.date_from and "date_to" not in upd:
             r.date_to = (date.fromisoformat(r.date_from) + timedelta(days=r.nights)).isoformat()
+    if "date_from" in upd or "date_to" in upd:
+        fix = normalize_dates(r)
+        if fix:
+            turn.think(fix)
     if r.date_from and r.date_to and ("date_from" in upd or "date_to" in upd):
         r.nights = (date.fromisoformat(r.date_to) - date.fromisoformat(r.date_from)).days
     new = r.model_dump()
@@ -240,6 +332,39 @@ def apply_updates(state: SessionState, upd: dict, turn: Turn) -> set[str]:
         if new[k] != old.get(k) and k not in ("assumptions", "origin_source", "nights_source", "year", "flexible"):
             changed.add(k)
     return changed
+
+
+def _shift_year(d: date, years: int) -> date:
+    try:
+        return d.replace(year=d.year + years)
+    except ValueError:  # 29 февраля
+        return d.replace(year=d.year + years, day=28)
+
+
+def normalize_dates(r: TripRequest) -> str | None:
+    """Чиним только явные ошибки: прошедшую дату начала (LLM ошиблась годом) и конец раньше начала.
+
+    Длинные поездки (месяц, полгода, год) допустимы — длительность считается от реальных дат.
+    """
+    if not r.date_from:
+        return None
+    t = today()
+    d1 = date.fromisoformat(r.date_from)
+    d2 = date.fromisoformat(r.date_to) if r.date_to else None
+    note = None
+    if d1 < t:
+        while d1 < t:
+            d1 = _shift_year(d1, 1)
+        if d2 and d2 < t:  # конец тоже в прошлом — сдвигаем вместе с началом
+            while d2 <= d1:
+                d2 = _shift_year(d2, 1)
+        note = "Дата начала уже прошла — перенёс её на ближайший такой день в будущем"
+    if d2 and d2 <= d1:  # «с 28 декабря по 5 января» — конец в следующем году
+        while d2 <= d1:
+            d2 = _shift_year(d2, 1)
+    r.date_from, r.date_to = d1.isoformat(), (d2.isoformat() if d2 else None)
+    r.month, r.year = d1.month, d1.year
+    return note
 
 
 def action_to_updates(action: dict) -> dict:
@@ -287,6 +412,7 @@ def action_to_updates(action: dict) -> dict:
         "add_transfer": lambda a: {"_intent": "add_transfer"},
         "booking_transfer": lambda a: {"_intent": "booking_transfer", "_args": a},
         "back_to_plan": lambda a: {"_intent": "back_to_plan"},
+        "apply_form": lambda a: {"_intent": "apply_form", "_form": a.get("values") or {}},
         "info": lambda a: {"_intent": "info"},
     }
     fn = mapping.get(t)
@@ -307,6 +433,7 @@ def handle(state: SessionState, message: str | None = None, action: dict | None 
     elif action and state.first_user_at is None:
         state.first_user_at = time.time()
 
+    silent_token = SILENT.set(bool(action and action.get("silent")))
     if action:
         upd = action_to_updates(action)
         turn.think(f"Действие из интерфейса: {action.get('type')}")
@@ -315,7 +442,7 @@ def handle(state: SessionState, message: str | None = None, action: dict | None 
         llm_upd = llm.extract(message or "", state.stage, context_text(state), today().isoformat()) if message else None
         if llm_upd is not None:
             turn.tool("llm_extract", {"model": "LLM"}, f"{len(llm_upd)} полей")
-        upd = merge_updates(upd, llm_upd)
+        upd = merge_updates(upd, llm_upd, message or "")
         found = {k: v for k, v in upd.items() if not k.startswith("_")}
         if found:
             turn.tool("parse_request", {"text": (message or "")[:80]}, describe_updates(found))
@@ -330,11 +457,31 @@ def handle(state: SessionState, message: str | None = None, action: dict | None 
         logging.getLogger("agent").exception("turn failed")
         out = reply(f"Что-то пошло не так при обработке ({type(e).__name__}). Попробуйте переформулировать — я сохранил все условия.",
                     chips=[chip("Начать заново", action={"type": "reset"})])
+    if turn.notes and out.get("text"):
+        out["text"] = "\n".join(turn.notes) + "\n\n" + out["text"]
+    out["text"] = hide_codes(out.get("text", ""))
     state.trace = turn.trace
     out["trace"] = turn.trace
     out["elapsed_ms"] = int((time.time() - turn.t0) * 1000)
-    state.history.append({"role": "agent", "text": out["text"], "ts": time.time()})
+    out["silent"] = SILENT.get()
+    if not out["silent"]:
+        state.history.append({"role": "agent", "text": out["text"], "ts": time.time()})
+    SILENT.reset(silent_token)
     return out
+
+
+def hide_codes(text: str) -> str:
+    """Подстраховка: если в текст (например, от LLM) попал служебный код места — меняем его на название."""
+    import re as _re
+
+    def repl(m):
+        code = m.group(0)
+        if code.startswith("o-"):
+            o = ORIGIN_BY_CODE.get(code)
+            return o.name if o else code
+        d = DEST_BY_ID.get(code)
+        return d.name if d else code
+    return _re.sub(r"\b[xo]-[0-9a-f]{10}\b", repl, text)
 
 
 def describe_updates(u: dict) -> str:
@@ -361,6 +508,8 @@ def describe_updates(u: dict) -> str:
 
 def route(state: SessionState, upd: dict, intent: str | None, message: str | None, turn: Turn) -> dict:
     # --- сброс
+    if intent == "apply_form":
+        return do_apply_form(state, upd.get("_form", {}), turn)
     if intent == "reset":
         keep_user = state.user_id
         fresh = SessionState(id=state.id, user_id=keep_user, history=state.history, booking_ids=state.booking_ids,
@@ -394,6 +543,21 @@ def route(state: SessionState, upd: dict, intent: str | None, message: str | Non
     changed = apply_updates(state, upd, turn)
     if changed:
         turn.think("Изменилось: " + ", ".join(sorted(changed)))
+    if SILENT.get() and intent is None:
+        # переключили настройку: пересобираем видимую карточку, если она есть, иначе только запоминаем
+        if not changed:
+            return reply("")
+        if state.stage == "bundles" and state.plan and state.req.destination:
+            if "priority" in changed:
+                # новый приоритет — подбираем заново, не держась за прежний отель и рейсы
+                for k in ("hotel_id", "out_id", "back_id", "rate"):
+                    state.pinned.pop(k, None)
+                return do_plan(state, turn, replan=True, sticky=False)
+            return do_plan(state, turn, replan=True)
+        if state.stage == "destinations" and state.dest_options:
+            return do_destinations(state, turn)
+        turn.think("Настройку запомнил — применю при следующем подборе")
+        return reply("")
 
     if intent == "greet" and not changed:
         return welcome(state)
@@ -523,7 +687,7 @@ def describe_changes(changed: set[str], r: TripRequest) -> str:
     if changed & {"date_from", "date_to", "month"}:
         bits.append("новые даты")
     if "nights" in changed and r.nights:
-        bits.append(f"{r.nights} ноч.")
+        bits.append(f"{r.nights} {plural(r.nights, 'ночь', 'ночи', 'ночей')}")
     if changed & {"adults", "children_ages", "children_pending"}:
         bits.append(f"состав — {r.adults or 2} взрослых" + (" и дети " + ", ".join(map(str, r.children_ages)) + " лет" if r.children_ages else ""))
     if "pets" in changed:
@@ -642,7 +806,20 @@ def ask(state: SessionState, missing: list[str], turn: Turn) -> dict:
     chips_.append(chip("Неважно, подбери сам", action={"type": "skip"}))
     turn.think("Без этого нельзя посчитать цены и погоду — спрашиваю одним сообщением: " + ", ".join(missing))
     text = (understood + "\n\n" if understood else "") + "Чтобы подобрать точно, уточню:\n" + "\n".join(f"• {q}" for q in qs)
+    if state.unknown_place:
+        text = unknown_note(state.unknown_place) + "\n\n" + text
     return reply(text, [], chips_)
+
+
+def unknown_note(place: dict) -> str:
+    if place.get("kind") == "region":
+        return f"🧭 {place['name']}: {place['note'] or 'подобрал конкретные места, куда можно поехать'}"
+    if place.get("kind") == "unreachable":
+        note = (place["note"] or "туда не продаются обычные туры").rstrip(". ")
+        return f"❗ {place['name']}: {note}. Подобрал, что реально забронировать."
+    like = ", ".join(PREF_LABELS.get(p, p) for p in place["prefs"] if p in PREF_LABELS)
+    return (f"❗ Направления «{place['name']}» в нашем каталоге пока нет, поэтому забронировать туда поездку не смогу. "
+            + (f"Подберу то, что ближе всего по духу: {like}." if like else "Подберу ближайшие по смыслу варианты."))
 
 
 def understood_line(state: SessionState) -> str:
@@ -652,6 +829,8 @@ def understood_line(state: SessionState) -> str:
         bits.append(DEST_BY_ID[r.destination].name)
     elif r.country:
         bits.append(r.country)
+    if r.origin and r.origin_source == "user" and r.origin in ORIGIN_BY_CODE:
+        bits.append(f"вылет из {ORIGIN_BY_CODE[r.origin].name_gen}")
     if r.prefs:
         bits.append(", ".join(PREF_LABELS.get(p, p) for p in r.prefs if p in PREF_LABELS))
     if r.month:
@@ -693,7 +872,8 @@ def fill_defaults(state: SessionState, turn: Turn) -> None:
         turn.think(f"Даты не указаны — беру ближайший удобный месяц: {MONTH_NAMES[m - 1]}")
     if not r.nights and not r.date_to:
         dest = DEST_BY_ID.get(r.destination) if r.destination else None
-        r.assumptions["nights"] = f"{planner.default_nights(r, dest)} ночей — типично для такого отдыха"
+        n = planner.default_nights(r, dest)
+        r.assumptions["nights"] = f"{n} {plural(n, 'ночь', 'ночи', 'ночей')} — типично для такого отдыха"
 
 
 # ====================================================================== вдохновение
@@ -703,7 +883,12 @@ def do_destinations(state: SessionState, turn: Turn, reason: str | None = None) 
     profile = store.get_profile(state.user_id)
     visited = [t["dest_id"] for t in profile.get("trips", [])]
     t0 = time.time()
-    opts, excluded = planner.rank_destinations(r, visited)
+    extra = []
+    if llm.enabled() and not r.candidates and not r.similar_to:
+        extra, names = dynamic.suggest(request_summary(r), ORIGIN_BY_CODE[r.origin or "MOW"].name)
+        if names:
+            turn.tool("llm_suggest_places", {"запрос": request_summary(r)[:80]}, "идеи ИИ: " + ", ".join(names))
+    opts, excluded = planner.rank_destinations(r, visited, extra=extra)
     turn.tool("search_destinations", {"month": r.month or (r.date_from or "")[:7], "prefs": r.prefs, "origin": r.origin,
                                       "max_flight_h": r.max_flight_h, "budget": r.budget},
               f"{len(opts)} направлений, исключено {len(excluded)} ({int((time.time() - t0) * 1000)} мс)")
@@ -724,6 +909,9 @@ def do_destinations(state: SessionState, turn: Turn, reason: str | None = None) 
         turn.tool("get_weather", {"dest": o["name"], "month": o["dates"]["text"]},
                   deg(o['weather']['air']) + (f", море +{o['weather']['sea']}°" if o["weather"]["sea"] is not None else ""))
     lead = opts[0]
+    if state.unknown_place:
+        reason = unknown_note(state.unknown_place) + (" " + reason if reason else "")
+        state.unknown_place = None
     text = (reason + "\n\n" if reason else "") + (understood_line(state) + "\n\n" if understood_line(state) else "")
     text += (f"Подобрал {len(opts)} {'направления' if len(opts) < 5 else 'направлений'} — от лучшего совпадения. "
              "Цена «под ключ»: дорога, отель и трансфер на всех, даты — самые выгодные в выбранном периоде.") \
@@ -738,6 +926,40 @@ def do_destinations(state: SessionState, turn: Turn, reason: str | None = None) 
     return reply(text, blocks, chips_)
 
 
+def request_summary(r: TripRequest) -> str:
+    """Запрос человеческим языком — для идей направлений от LLM."""
+    bits = []
+    if r.date_from:
+        d1 = date.fromisoformat(r.date_from)
+        bits.append("даты " + (date_range_text(d1, date.fromisoformat(r.date_to)) if r.date_to else f"с {ddmm(d1)} {d1.year}"))
+    elif r.month:
+        bits.append(f"в {MONTH_LOC[r.month - 1]} {r.year or ''}".strip())
+    if r.nights:
+        bits.append(f"{r.nights} {plural(r.nights, 'ночь', 'ночи', 'ночей')}")
+    bits.append(f"{r.adults or 2} взрослых" + (f", дети {', '.join(map(str, r.children_ages))} лет" if r.children_ages else ""))
+    if r.prefs:
+        bits.append("хотят: " + ", ".join(PREF_LABELS.get(p, p) for p in r.prefs if p in PREF_LABELS))
+    if r.budget:
+        bits.append(f"бюджет до {rub(r.budget)} на всех")
+    elif r.budget_level == "low":
+        bits.append("недорого")
+    elif r.budget_level == "high":
+        bits.append("бюджет не ограничен")
+    if r.max_flight_h:
+        bits.append(f"в пути не больше {r.max_flight_h:g} ч")
+    if r.pets:
+        bits.append("едут с питомцем")
+    if r.visa_free:
+        bits.append("без визы")
+    if r.transport == "train":
+        bits.append("только поездом")
+    if r.country:
+        bits.append(f"страна: {r.country}")
+    if r.avoid:
+        bits.append("кроме: " + ", ".join(r.avoid))
+    return "; ".join(bits)
+
+
 def mark_reco(state: SessionState) -> None:
     if state.first_reco_at is None:
         state.first_reco_at = time.time()
@@ -747,7 +969,7 @@ def mark_reco(state: SessionState) -> None:
 
 # ====================================================================== план
 
-def do_plan(state: SessionState, turn: Turn, replan: bool = False, reason: str | None = None) -> dict:
+def do_plan(state: SessionState, turn: Turn, replan: bool = False, reason: str | None = None, sticky: bool = True) -> dict:
     r = state.req
     dest = DEST_BY_ID[r.destination]
     missing = missing_slots(state)
@@ -769,7 +991,7 @@ def do_plan(state: SessionState, turn: Turn, replan: bool = False, reason: str |
     if old and old.get("dest_id") != r.destination:
         state.pinned = {}
     turn.think(("Пересобираю: " if replan else "Собираю поездку ") + f"{dest.name} — транспорт, отели, трансферы, состыковки")
-    plan = planner.build_plan(r, r.destination, state.pinned, old if replan else None)
+    plan = planner.build_plan(r, r.destination, state.pinned, old if replan and sticky else None)
     for t in plan.get("trace", []):
         turn.tool(t["tool"], t["args"], t["result"])
     if plan.get("error"):
@@ -782,7 +1004,7 @@ def do_plan(state: SessionState, turn: Turn, replan: bool = False, reason: str |
     state.cart = None
     mark_reco(state)
     update_profile(state)
-    diff = planner.plan_diff(old, plan) if replan else []
+    diff = planner.plan_diff(old, plan) if replan and not SILENT.get() else []
     if replan:
         state.replans += 1
         store.log_event(state.id, state.user_id, "replan", {"diff": diff})
@@ -892,14 +1114,14 @@ def show_hotels(state: SessionState) -> dict:
     if plan.get("excluded_hotels"):
         text += "\n\nЧестно отсеял: " + "; ".join(f"{h['name']} — {h['reason']}" for h in plan["excluded_hotels"][:3]) + "."
     return reply(text, [{"type": "hotels", "rows": rows, "excluded": plan.get("excluded_hotels", [])}],
-                 [chip("Покажи рейсы", action={"type": "show_flights"}), chip("Вернуться к вариантам", action={"type": "back_to_plan"})])
+                 [chip("Сравнить маршруты", action={"type": "show_flights"}), chip("Вернуться к вариантам", action={"type": "back_to_plan"})])
 
 
 def show_flights(state: SessionState) -> dict:
     plan = state.plan
     return reply("Варианты дороги туда и обратно. Цена — на всех, с багажом. Выберите — пересоберу план вокруг рейса.",
                  [{"type": "flights", "out": plan["flights_out"], "back": plan["flights_back"]}],
-                 [chip("Покажи отели", action={"type": "show_hotels"}), chip("Вернуться к вариантам", action={"type": "back_to_plan"})])
+                 [chip("Сравнить отели", action={"type": "show_hotels"}), chip("Вернуться к вариантам", action={"type": "back_to_plan"})])
 
 
 # ====================================================================== изменения условий
@@ -991,7 +1213,7 @@ def do_why(state: SessionState, turn: Turn) -> dict:
         h = b["hotel"]
         lines = [f"**Почему «{b['title']}»: {h['name']}** ({h['stars']}★, {h['area']}).",
                  f"Я сравнивал варианты по формуле: цена {int(w['price'] * 100)}% · отель под вас {int(w['hotel'] * 100)}% · "
-                 f"дорога {int(w['transport'] * 100)}% · трансфер {int(w['transfer'] * 100)}%. "
+                 f"удобство рейсов {int(w['transport'] * 100)}% · время в пути {int(w['time'] * 100)}%. "
                  f"Режим «{PRIORITY_LABELS[r.priority]}» — переключите, если важнее другое."]
         lines.append("\n**Плюсы для вас:** " + "; ".join(b["explain"]["why"]) + ".")
         if b["explain"]["tradeoffs"]:
@@ -1140,7 +1362,7 @@ def present_cart(state: SessionState, note: str | None = None) -> dict:
     errors = [i for i in view["issues"] if i["level"] == "error"]
     warns = [i for i in view["issues"] if i["level"] == "warn"]
     lines = []
-    if note:
+    if note and not SILENT.get():
         lines.append(note)
     lines.append(f"Собрал поездку в корзину: **{view['dest_name']}, {view['dates_text']}**, итого **{rub(view['total'])}**.")
     lines.append("Прошёлся по состыковкам ещё раз: " + ("ошибок нет" if not errors else f"⚠️ {len(errors)} ошибки") +
@@ -1518,6 +1740,173 @@ def cancel_quote(bk: dict) -> dict:
 
 # ====================================================================== сводка для UI
 
+# ====================================================================== форма «Что я понял»
+
+WISH_KEYS = ("prefs", "meal", "free_cancel", "direct_only", "max_flight_h", "transport", "stars_min", "beach_close",
+             "center_close", "visa_free", "flight_time_pref", "accessible")
+
+
+def wishes_text(r: TripRequest) -> str:
+    """Пожелания словами — так, чтобы их же понял разбор при «Применить»."""
+    bits = [PREF_LABELS[p] for p in r.prefs if p in PREF_LABELS]
+    if r.max_flight_h:
+        bits.append(f"в пути не больше {r.max_flight_h:g} ч")
+    if r.direct_only:
+        bits.append("без пересадок")
+    if r.transport == "train":
+        bits.append("поездом")
+    if r.meal:
+        bits.append(inv.MEAL_NAMES[r.meal])
+    if r.free_cancel:
+        bits.append("бесплатная отмена")
+    if r.stars_min:
+        bits.append(f"от {r.stars_min} звёзд")
+    if r.visa_free:
+        bits.append("без визы")
+    if r.beach_close:
+        bits.append("первая линия")
+    if r.center_close:
+        bits.append("в центре")
+    if r.flight_time_pref:
+        bits.append({"morning": "утренний вылет", "day": "дневной вылет", "evening": "вечерний вылет"}[r.flight_time_pref])
+    if r.budget_level == "low" and not r.budget:
+        bits.append("недорого")
+    if r.accessible:
+        bits.append("доступная среда")
+    return ", ".join(bits)
+
+
+def form_values(state: SessionState) -> dict:
+    r = state.req
+    dest = ""
+    if r.destination and r.destination in DEST_BY_ID:
+        dest = DEST_BY_ID[r.destination].name
+    elif r.country:
+        dest = r.country
+    date_from, date_to = r.date_from or "", r.date_to or ""
+    if state.plan and not date_from:
+        date_from, date_to = state.plan["date_from"], state.plan["date_to"]
+    return {
+        "origin": ORIGIN_BY_CODE[r.origin].name if r.origin and r.origin in ORIGIN_BY_CODE else "",
+        "destination": dest, "date_from": date_from, "date_to": date_to,
+        "month": r.month or "", "nights": r.nights or (state.plan["nights_requested"] if state.plan else ""),
+        "adults": r.adults or "", "children": (len(r.children_ages) + r.children_pending) or "",
+        "budget": r.budget or "", "pets": r.pets or "", "wishes": wishes_text(r),
+    }
+
+
+def do_apply_form(state: SessionState, f: dict, turn: Turn) -> dict:
+    """Пользователь сам заполнил параметры поездки в панели — пересчитываем подборку под них."""
+    r = state.req
+    old_dest, old_plan = r.destination, state.plan
+    before = r.model_dump()
+    turn.think("Пользователь задал параметры в форме — применяю их целиком и подбираю заново")
+    upd: dict = {}
+
+    def text(k):
+        return str(f.get(k) or "").strip()
+
+    # откуда
+    if text("origin"):
+        p = nlu.parse("вылет из " + text("origin"))
+        if p.get("origin"):
+            upd["origin"] = p["origin"]
+        else:
+            upd["_origin_place"], upd["_origin_strong"] = text("origin"), True
+    # куда: пусто — подобрать за пользователя
+    r.destination, r.country, r.candidates, r.similar_to, r.similar_label = None, None, [], [], None
+    state.unknown_place = None
+    if text("destination"):
+        p = nlu.parse("хочу в " + text("destination"))
+        for k in ("destination", "country", "_unknown_place", "_gateway_note"):
+            if k in p:
+                upd[k] = p[k]
+        if not any(k in p for k in ("destination", "country", "_unknown_place")):
+            upd["_unknown_place"] = {"name": text("destination"), "prefs": [], "query": text("destination")}
+    # когда
+    r.date_from = r.date_to = None
+    r.assumptions.pop("when", None)
+    if text("date_from"):
+        upd["date_from"] = text("date_from")
+        if text("date_to"):
+            upd["date_to"] = text("date_to")
+        upd["flexible"] = False
+    elif text("month"):
+        try:
+            m = int(text("month"))
+            upd["month"], upd["year"] = m, nlu._year_for(m, 28)
+        except ValueError:
+            pass
+    if text("nights") and not text("date_to"):
+        try:
+            upd["nights"] = max(1, int(text("nights")))
+        except ValueError:
+            pass
+    # кто едет
+    if text("adults"):
+        try:
+            upd["adults"] = max(1, min(12, int(text("adults"))))
+            r.assumptions.pop("adults", None)
+        except ValueError:
+            pass
+    if "children" in f:  # «Детей»: число; возрасты уже известных детей сохраняем, про новых спросим
+        try:
+            n = max(0, min(10, int(text("children") or 0)))
+        except ValueError:
+            n = len(r.children_ages)
+        ages = r.children_ages[:n]
+        upd["children_ages"], upd["children_pending"] = ages, n - len(ages)
+        if n - len(ages) > 0:
+            upd["_kids_count_unknown"] = True
+        else:
+            r.assumptions.pop("children", None)
+    # бюджет, питомец и пожелания — только если поля есть в форме (иначе сохраняем то, что понято из диалога)
+    if "budget" in f:
+        budget = re.sub(r"[^\d]", "", text("budget"))
+        r.budget = int(budget) if budget else None
+    if "pets" in f:
+        r.pets = text("pets") or None
+    if "wishes" in f:  # пожелания из формы заменяют прежние
+        for k, v in TripRequest().model_dump().items():
+            if k in WISH_KEYS:
+                setattr(r, k, v)
+        r.budget_level = None
+    if text("wishes"):
+        w = nlu.parse(text("wishes"))
+        if llm.enabled():
+            w = merge_updates(w, llm.extract(text("wishes"), state.stage, context_text(state), today().isoformat()), text("wishes"))
+        for k in WISH_KEYS + ("budget_level",):
+            if k in w:
+                upd[k] = w[k]
+        if w.get("_unknown_place") and "destination" not in upd and "_unknown_place" not in upd and not text("destination"):
+            upd["_unknown_place"] = w["_unknown_place"]
+    state.pinned, state.cart = {}, None
+    for k in ("when", "party", "origin"):
+        if k not in state.asked:
+            state.asked.append(k)
+    if upd.get("children_pending"):  # добавили детей — спросим их возраст (влияет на цену и выбор отелей)
+        state.asked = [a for a in state.asked if a != "children_ages"]
+    apply_updates(state, upd, turn)
+    after = r.model_dump()
+    changed = {k for k in after if after[k] != before.get(k) and k not in ("assumptions", "origin_source", "nights_source",
+                                                                          "year", "flexible", "candidates", "similar_to",
+                                                                          "similar_label")}
+    if state.plan and old_plan and r.date_from == old_plan["date_from"] and r.date_to == old_plan["date_to"]:
+        changed -= {"date_from", "date_to", "month", "nights"}
+    if state.stage in ("booked",):
+        state.stage = "start"
+    missing = missing_slots(state)
+    if missing:
+        return ask(state, missing, turn)
+    fill_defaults(state, turn)
+    if r.destination:
+        same = old_plan is not None and old_dest == r.destination
+        state.plan = old_plan if same else None
+        return do_plan(state, turn, replan=same, reason="Применил ваши параметры" + (": " + describe_changes(changed, r) if same and describe_changes(changed, r) else "") + ".")
+    state.plan = None
+    return do_destinations(state, turn, reason="Применил ваши параметры — вот что подходит.")
+
+
 def summary(state: SessionState) -> dict:
     r = state.req
     slots = []
@@ -1583,4 +1972,4 @@ def summary(state: SessionState) -> dict:
         b = state.cart["bundle"]
         cart = {"title": f"{DEST_BY_ID[b['dest_id']].name}: {b['hotel']['name']}", "total": b["total"]}
     return {"slots": slots, "priority": r.priority, "stage": state.stage, "cart": cart, "memory": state.memory_applied,
-            "assumptions": r.assumptions, "booking_ids": state.booking_ids}
+            "assumptions": r.assumptions, "booking_ids": state.booking_ids, "form": form_values(state)}

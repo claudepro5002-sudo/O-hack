@@ -50,7 +50,6 @@ a { color: var(--accent-text); }
 .logo { color: var(--accent); font-size: 20px; }
 .brand-name { font-weight: 800; font-size: 19px; letter-spacing: -.3px; }
 .brand-sub { color: var(--muted); font-weight: 600; }
-.badge-mock { font-size: 12px; color: var(--warn); background: var(--warn-soft); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
 .top-actions { display: flex; gap: 4px; align-items: center; }
 .panel-toggle { display: none; }
 .mobile-only { display: none; }
@@ -90,11 +89,6 @@ a { color: var(--accent-text); }
 .slot.editable:hover { border-color: var(--border); background: var(--surface-2); }
 .slot-label { color: var(--muted); font-size: 13px; white-space: nowrap; }
 .slot-value { text-align: right; font-weight: 600; font-size: 14px; }
-.src { font-size: 11px; padding: 1px 6px; border-radius: 999px; margin-left: 4px; font-weight: 600; vertical-align: 1px; }
-.src-user { background: var(--good-soft); color: var(--good); }
-.src-memory { background: var(--violet-soft); color: var(--violet); }
-.src-assumed, .src-agent { background: var(--warn-soft); color: var(--warn); }
-.legend { display: flex; gap: 6px; margin-top: 8px; }
 .segmented { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
 .segmented button { border: 0; border-radius: 0; padding: 7px 4px; font-size: 13px; background: var(--surface); }
 .segmented button + button { border-left: 1px solid var(--border); }
@@ -201,7 +195,7 @@ tr.in-plan td { background: var(--accent-soft); }
   .mobile-only { display: flex; gap: 4px; flex-wrap: wrap; }
   .mobile-only button[data-open] { display: inline-block; }
   .top-actions button[data-open] { display: none; }
-  .brand-sub, .badge-mock { display: none; }
+  .brand-sub { display: none; }
   .topbar { padding: 10px 12px; }
   .messages { padding: 12px; }
   .chips { padding: 8px 12px; overflow-x: auto; flex-wrap: nowrap; }
@@ -209,3 +203,17 @@ tr.in-plan td { background: var(--accent-soft); }
   .msg.user { max-width: 90%; }
   .grid { grid-template-columns: 1fr; }
 }
+
+/* тихое обновление карточек при переключении настроек */
+body.updating .msg.agent[data-kind] { opacity: .55; transition: opacity .15s; }
+body.updating { cursor: progress; }
+
+/* форма параметров поездки */
+.trip-form { display: flex; flex-direction: column; gap: 8px; }
+.trip-form label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); min-width: 0; }
+.trip-form input, .trip-form select, .trip-form textarea { font: inherit; font-size: 14px; color: var(--text); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; width: 100%; min-width: 0; }
+.trip-form textarea { resize: vertical; min-height: 44px; }
+.trip-form input:focus, .trip-form select:focus, .trip-form textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.trip-form .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.trip-form button { margin-top: 2px; }
