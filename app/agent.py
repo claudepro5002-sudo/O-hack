@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta
 
 from . import dynamic, llm, nlu, planner, store
 from . import inventory as inv
-from .data.destinations import DEST_BY_ID, MONTH_LOC, MONTH_NAMES
+from .data.destinations import DEST_BY_ID, GATEWAYS, MONTH_LOC, MONTH_NAMES
 from .data.geo import ORIGIN_BY_CODE, ORIGINS
 from .planner import date_range_text, ddmm, deg, hours, rub
 from .state import PREF_LABELS, PRIORITY_LABELS, SessionState, TripRequest, today
@@ -179,6 +179,9 @@ def merge_updates(rule: dict, llm_upd: dict | None, text: str = "") -> dict:
     if dest and dest != rule.get("destination") and text and rules_saw_place and not mentioned(dest, text):
         # в сообщении есть другое место (например, «Антарктида»), а LLM подставила похожее из каталога («Анталья»)
         llm_upd.pop("destination")
+    unk = llm_upd.get("_unknown_place")
+    if isinstance(unk, str) and not rules_saw_place and any(re.search(rx, nlu.norm(unk)) for _, rx in nlu.PREF_PATTERNS):
+        llm_upd.pop("_unknown_place")  # «кемпинг», «море» — это тип отдыха, а не место
     out = dict(rule)
     rule_dates = any(k in rule for k in ("date_from", "date_to"))
     for k, v in llm_upd.items():
@@ -421,6 +424,64 @@ def action_to_updates(action: dict) -> dict:
 
 # ====================================================================== главный ход
 
+# Новый запрос посреди старой поездки («а теперь хочу в поход») — подбираем заново, а не правим прежний план
+TRIP_TYPE_PREFS = {"sea", "warm", "mild", "nature", "mountains", "ski", "city", "culture", "party", "northern_lights",
+                   "surf", "diving", "wellness", "kids_fun", "adventure", "shopping", "food", "romantic"}
+PREF_KIND = {"sea": "beach", "warm": "beach", "nature": "nature", "mountains": "nature", "adventure": "nature",
+             "ski": "ski", "city": "city", "culture": "city", "shopping": "city", "food": "city"}
+NEW_TRIP_STRONG = re.compile(
+    r"составь|спланируй|подбери|организуй|придумай|предложи|поездк|путешеств|отпуск|а теперь|теперь хочу|вместо|"
+    r"лучше|передумал|друг(ое|ую|ой|ие)|нов(ую|ое|ый|ые)|куда-нибудь|куда нибудь")
+NEW_TRIP_WEAK = re.compile(r"хочу|хотим|хотелось|давай|поехать|поедем|съездить|махнуть|отправиться|рвануть|"
+                           r"(?<![а-я])(в|на)\s+(поход|кемпинг|глэмпинг|природ|море|горы|пляж|рыбалк|сафари|сплав)")
+GATEWAY_IDS = {g[1] for g in GATEWAYS}  # Ушуая, Мурманск — «ворота» к круизам, а не место для любого отдыха
+CAMPING = re.compile(r"кемпинг|глэмпинг|палатк|поход|костр|сплав")
+
+
+def new_trip_prefs(state: SessionState, upd: dict, intent: str | None, message: str | None) -> list[str] | None:
+    """Если сообщение — новый запрос другой поездки, возвращает её тип (prefs), иначе None."""
+    r = state.req
+    if not message or intent or state.awaiting or state.stage in ("start", "checkout"):
+        return None
+    if not (r.destination or r.country or r.candidates or state.unknown_place):
+        return None  # прежней поездки ещё нет — нечего сбрасывать
+    if any(k in upd for k in ("country", "_unknown_place", "_gateway_note")):
+        return None  # названо новое место — это обычная смена направления
+    if upd.get("destination") and (upd["destination"] != r.destination or mentioned(upd["destination"], message)):
+        return None
+    if r.destination and mentioned(r.destination, message):
+        return None  # говорят о текущем направлении
+    kinds = set(upd.get("prefs", [])) & TRIP_TYPE_PREFS
+    if not kinds or kinds <= set(r.prefs):
+        return None
+    t = nlu.norm(message)
+    if NEW_TRIP_STRONG.search(t) or upd.get("_open_destination"):
+        return sorted(kinds)
+    if NEW_TRIP_WEAK.search(t) and r.destination:
+        d = DEST_BY_ID.get(r.destination)
+        fits = d is not None and r.destination not in GATEWAY_IDS and all(
+            p in d.tags or PREF_KIND.get(p) in d.kinds for p in kinds)
+        return None if fits else sorted(kinds)
+    return None
+
+
+def start_new_trip(state: SessionState, upd: dict, kinds: list[str], message: str, turn: Turn) -> None:
+    """Сбрасываем прежнее направление и план; город вылета, состав, даты и бюджет оставляем."""
+    r = state.req
+    old = DEST_BY_ID[r.destination].name if r.destination and r.destination in DEST_BY_ID else (r.country or "")
+    if upd.get("destination") == r.destination:
+        upd.pop("destination")  # LLM повторила прежнее направление из контекста
+    r.destination, r.country, r.candidates, r.similar_to, r.similar_label = None, None, [], [], None
+    r.prefs = [p for p in r.prefs if p not in TRIP_TYPE_PREFS]  # прежний тип отдыха больше не нужен
+    state.unknown_place = None
+    state.plan, state.cart, state.pinned, state.selected, state.dest_options = None, None, {}, None, []
+    label = ", ".join(PREF_LABELS.get(p, p) for p in kinds)
+    if CAMPING.search(nlu.norm(message)):
+        label = "кемпинг и походы на природе"
+    turn.think(f"Новый запрос ({label}) — начинаю подбор заново" + (f", «{old}» больше не предлагаю" if old else ""))
+    turn.notes.append(f"Новая поездка — {label}: подбираю направления заново, город вылета, состав и даты сохранил.")
+
+
 def handle(state: SessionState, message: str | None = None, action: dict | None = None) -> dict:
     turn = Turn()
     state.turns += 1
@@ -450,6 +511,10 @@ def handle(state: SessionState, message: str | None = None, action: dict | None 
             turn.think(f"Намерение: {upd['_intent']}")
 
     intent = upd.pop("_intent", None)
+    if not action:
+        kinds = new_trip_prefs(state, upd, intent, message)
+        if kinds:
+            start_new_trip(state, upd, kinds, message or "", turn)
     try:
         out = route(state, upd, intent, message, turn)
     except Exception as e:  # noqa: BLE001 — агент не должен падать на ходе пользователя

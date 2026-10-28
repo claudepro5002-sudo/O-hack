@@ -168,3 +168,26 @@ def test_trip_form_apply():
     form = {k: v for k, v in agent.summary(s)["form"].items() if k in form} | {"destination": ""}
     agent.handle(s, None, {"type": "apply_form", "values": form})
     assert s.req.destination is None and s.stage == "destinations" and s.req.meal == "AI"
+
+
+def test_new_request_restarts_search():
+    store.reset_for_tests()
+    s = SessionState(user_id="t-newtrip")
+    agent.handle(s, "Хочу в Антарктиду в январе вдвоём из Москвы")
+    assert s.req.destination == "ushuaia" and s.stage == "bundles"
+    out = agent.handle(s, "составь поездку на кемпинг")
+    assert s.req.destination is None and s.stage == "destinations" and "nature" in s.req.prefs
+    assert "Новая поездка" in out["text"] and "Ушуа" not in out["text"].split("\n")[0]
+    assert all(d["dest_id"] != "ushuaia" for d in s.dest_options[:1])
+    assert s.req.origin == "MOW" and s.req.adults == 2 and s.req.month == 1  # остальное сохранили
+
+
+def test_refinement_keeps_trip():
+    store.reset_for_tests()
+    s = SessionState(user_id="t-refine")
+    agent.handle(s, "Анталья в июле вдвоём на неделю из Москвы")
+    assert s.req.destination == "antalya"
+    agent.handle(s, "хочу на море, и чтобы было тихо")
+    assert s.req.destination == "antalya" and s.stage == "bundles"
+    agent.handle(s, "подбери подешевле")
+    assert s.req.destination == "antalya"

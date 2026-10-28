@@ -156,3 +156,17 @@ def test_unknown_place_replaces_current_destination_without_llm(monkeypatch):
     agent.handle(s, "Хургада в декабре на неделю вдвоём")
     agent.handle(s, "хочу в антарктиду")
     assert s.req.destination == "ushuaia"
+
+
+def test_llm_repeating_old_place_does_not_block_new_request(monkeypatch):
+    store.reset_for_tests()
+    llm_env(monkeypatch)
+    s = SessionState(user_id="t-llm-new")
+    monkeypatch.setattr(llm, "_chat", lambda *a, **k: None)
+    agent.handle(s, "Анталья в июле вдвоём на неделю из Москвы")
+    assert s.req.destination == "antalya"
+    # LLM по контексту повторила прежнее направление и приняла «кемпинг» за место
+    monkeypatch.setattr(llm, "_chat", lambda *a, **k: json.dumps(
+        {"destination": "antalya", "_unknown_place": "кемпинг", "prefs": ["nature"]}))
+    agent.handle(s, "составь поездку на кемпинг")
+    assert s.req.destination is None and s.stage == "destinations" and s.unknown_place is None
