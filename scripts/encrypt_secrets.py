@@ -4,7 +4,8 @@
     python scripts/encrypt_secrets.py --check  # только проверка перед сдачей, ничего не шифрует
 
 Расшифровать secrets.env.age может только организатор (закрытый ключ у него). Значения ключей
-скрипт никогда не печатает. Нужна утилита age: https://github.com/FiloSottile/age
+скрипт никогда не печатает. Шифрует утилитой age (https://github.com/FiloSottile/age), а если её
+нет или Windows не даёт её запустить — тем же форматом через Python-библиотеку pyrage (ставится сама).
 """
 from __future__ import annotations
 
@@ -149,24 +150,50 @@ def check_output(values: dict[str, str]) -> None:
         warnings.append("secrets.env.age ещё не закоммичен")
 
 
-def encrypt() -> None:
+def encrypt_with_age() -> str | None:
+    """Шифруем утилитой age. → None при успехе, иначе причина, почему не вышло."""
     # в Windows сначала ищем именно age.exe: в PATH от winget бывает одноимённая папка «age»
     names = ("age.exe", "age") if platform.system() == "Windows" else ("age",)
     age = next((p for p in map(shutil.which, names) if p and Path(p).is_file()), None)
     if not age:
-        errors.append(f"не найдена утилита age. Установите: {INSTALL.get(platform.system(), INSTALL['Linux'])}")
-        return
-    # именно -o, без > и | — в PowerShell перенаправление портит бинарный файл
+        return "утилита age не найдена"
     try:
+        # именно -o, без > и | — в PowerShell перенаправление портит бинарный файл
         r = subprocess.run([age, "-r", RECIPIENT, "-o", str(OUT), str(ENV)], cwd=ROOT, capture_output=True, text=True)
-    except OSError as e:
-        errors.append(f"не удалось запустить {age}: {e}. Зашифруйте вручную: age.exe -r {RECIPIENT} -o secrets.env.age .env"
-                      " — и запустите скрипт с --check")
+    except OSError as e:  # например, Windows/антивирус не дают запустить age.exe
+        return f"не удалось запустить age ({e})"
+    return None if r.returncode == 0 else f"age завершился с ошибкой: {r.stderr.strip()}"
+
+
+def encrypt_with_pyrage() -> str | None:
+    """Тот же формат age, но через Python-библиотеку pyrage — если саму утилиту запустить нельзя."""
+    try:
+        import pyrage
+    except ImportError:
+        print("  … ставлю Python-библиотеку pyrage (тот же формат age)", flush=True)
+        r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pyrage"], capture_output=True, text=True)
+        if r.returncode != 0:
+            return f"не удалось установить pyrage: {r.stderr.strip()[-300:]}"
+        import pyrage
+    OUT.write_bytes(pyrage.encrypt(ENV.read_bytes(), [pyrage.x25519.Recipient.from_str(RECIPIENT)]))
+    return None
+
+
+def encrypt() -> None:
+    reason = encrypt_with_age()
+    if reason is None:
+        ok("зашифровал .env → secrets.env.age (age)")
         return
-    if r.returncode != 0:
-        errors.append(f"age завершился с ошибкой: {r.stderr.strip()}")
+    print(f"  … {reason} — шифрую через pyrage", flush=True)
+    try:
+        fallback = encrypt_with_pyrage()
+    except Exception as e:  # noqa: BLE001
+        fallback = str(e)
+    if fallback is None:
+        ok("зашифровал .env → secrets.env.age (pyrage, формат age)")
     else:
-        ok("зашифровал .env → secrets.env.age")
+        errors.append(f"{reason}; запасной способ тоже не сработал: {fallback}. Установите age: "
+                      f"{INSTALL.get(platform.system(), INSTALL['Linux'])}")
 
 
 def main() -> None:
