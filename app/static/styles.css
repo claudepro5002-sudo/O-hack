@@ -19,12 +19,21 @@
   --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 4px 16px rgba(16, 24, 40, .06);
   --radius: 14px;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
+/* Тёмная тема: по настройке системы или по кнопке в шапке (data-theme на <html>) */
+:root[data-theme="dark"] {
     --bg: #0f141b; --surface: #171e27; --surface-2: #1d2531; --text: #e8edf3; --muted: #93a0b0; --border: #2a3441;
     --accent: #3d9bff; --accent-soft: #15283f; --accent-text: #7ab8ff; --good: #3fc48f; --good-soft: #132e24;
     --warn: #f0a63a; --warn-soft: #33270f; --bad: #f06b6b; --bad-soft: #3a1818; --violet: #9a85ff; --violet-soft: #241d42;
     --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+    color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f141b; --surface: #171e27; --surface-2: #1d2531; --text: #e8edf3; --muted: #93a0b0; --border: #2a3441;
+    --accent: #3d9bff; --accent-soft: #15283f; --accent-text: #7ab8ff; --good: #3fc48f; --good-soft: #132e24;
+    --warn: #f0a63a; --warn-soft: #33270f; --bad: #f06b6b; --bad-soft: #3a1818; --violet: #9a85ff; --violet-soft: #241d42;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+    color-scheme: dark;
   }
 }
 * { box-sizing: border-box; }
@@ -52,6 +61,7 @@ a { color: var(--accent-text); }
 .brand-sub { color: var(--muted); font-weight: 600; }
 .top-actions { display: flex; gap: 4px; align-items: center; }
 .panel-toggle { display: none; }
+.theme-toggle { font-size: 17px; line-height: 1; padding: 6px 9px; }
 .mobile-only { display: none; }
 
 .layout { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; padding: 16px; min-height: 0; max-width: 1500px; width: 100%; margin: 0 auto; }

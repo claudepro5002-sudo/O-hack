@@ -6,7 +6,11 @@
   <title>Трип-агент Островка</title>
   <meta name="description" content="AI-агент: от одного сообщения до оформленной поездки">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><circle cx='32' cy='32' r='30' fill='%230a7cff'/><path d='M14 38c8-10 28-10 36 0' stroke='white' stroke-width='5' fill='none' stroke-linecap='round'/><circle cx='32' cy='24' r='6' fill='white'/></svg>">
-  <link rel="stylesheet" href="/static/styles.css?v=3">
+  <script>
+    // тема до отрисовки, чтобы страница не мигала светлой: сохранённый выбор, иначе — как в системе
+    try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
+  <link rel="stylesheet" href="/static/styles.css?v=4">
 </head>
 <body>
 <header class="topbar">
@@ -19,6 +23,7 @@
     <button class="ghost" data-open="trips">Мои поездки</button>
     <button class="ghost" data-open="memory">Память</button>
     <button class="ghost" data-open="metrics">Метрики</button>
+    <button class="ghost theme-toggle" id="themeToggle" aria-label="Тёмная тема" title="Тёмная тема">🌙</button>
     <button class="primary small" id="newTrip">Новая поездка</button>
     <button class="ghost panel-toggle" id="panelToggle" aria-label="План поездки">План</button>
   </nav>
@@ -81,6 +86,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=3"></script>
+<script src="/static/app.js?v=4"></script>
 </body>
 </html>

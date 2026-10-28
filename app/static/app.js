@@ -487,8 +487,28 @@
   // ------------------------------------------------------------------ панель на мобиле
   function closePanel() { $("#panel").classList.remove("open"); }
 
+  // ------------------------------------------------------------------ тема
+  const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+  const isDark = () => (document.documentElement.dataset.theme || (darkQuery.matches ? "dark" : "light")) === "dark";
+  function showThemeButton() {
+    const b = $("#themeToggle");
+    const label = isDark() ? "Светлая тема" : "Тёмная тема";
+    b.textContent = isDark() ? "☀️" : "🌙";
+    b.title = label;
+    b.setAttribute("aria-label", label);
+  }
+  function toggleTheme() {
+    const next = isDark() ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    store.set("theme", next);
+    showThemeButton();
+  }
+
   // ------------------------------------------------------------------ init
   document.addEventListener("DOMContentLoaded", async () => {
+    showThemeButton();
+    $("#themeToggle").onclick = toggleTheme;
+    darkQuery.addEventListener?.("change", showThemeButton);
     const input = $("#input");
     $("#composer").onsubmit = (e) => { e.preventDefault(); const v = input.value.trim(); if (!v) return; input.value = ""; input.style.height = ""; send(v); };
     input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#composer").requestSubmit(); } });
