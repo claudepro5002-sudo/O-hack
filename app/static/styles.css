@@ -95,6 +95,11 @@ a { color: var(--accent-text); }
 .msg.agent .bubble { background: var(--surface-2); border: 1px solid var(--border); border-radius: 16px 16px 16px 4px; }
 .bubble { padding: 10px 14px; white-space: normal; overflow-wrap: anywhere; }
 .msg.agent .bubble { max-width: 820px; }
+.msg-tools { display: flex; margin-top: -4px; }
+.msg.user .msg-tools { justify-content: flex-end; }
+.copy-btn { border: 0; background: transparent; color: var(--muted); padding: 3px 5px; border-radius: 6px; line-height: 0; }
+.copy-btn:hover { color: var(--text); background: var(--surface-2); }
+.copy-btn.done { color: var(--good); }
 .typing { color: var(--muted); font-style: italic; }
 .typing::after { content: "…"; animation: blink 1s infinite; }
 @keyframes blink { 50% { opacity: .2; } }

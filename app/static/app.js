@@ -52,7 +52,7 @@
     $("#messages").innerHTML = "";
     $("#chips").innerHTML = "";
     feed.forEach((x, i) => (x.role === "user"
-      ? $("#messages").appendChild(h(`<div class="msg user"><div class="bubble">${esc(x.text)}</div></div>`))
+      ? $("#messages").appendChild(userMsg(x.text))
       : addAgent(x.m, true, i)));
     scrollDown();
   }
@@ -149,14 +149,41 @@
   // ------------------------------------------------------------------ лента
   function addUser(text) {
     feed.push({ role: "user", text });
-    $("#messages").appendChild(h(`<div class="msg user"><div class="bubble">${esc(text)}</div></div>`));
+    $("#messages").appendChild(userMsg(text));
     $("#chips").innerHTML = "";
     scrollDown();
   }
   const KINDS = ["plan", "cart", "destinations"];
   const kindOf = (m) => ((m.blocks || []).find((b) => KINDS.includes(b.type)) || {}).type || "";
+  // Кнопка «Копировать» под текстом сообщения
+  const COPY_ICON = `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>`;
+  const DONE_ICON = `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>`;
+  const copyBar = () => `<div class="msg-tools"><button type="button" class="copy-btn" title="Копировать" aria-label="Копировать текст">${COPY_ICON}</button></div>`;
+  const userMsg = (text) => h(`<div class="msg user"><div class="bubble">${esc(text)}</div>${copyBar()}</div>`);
+  async function copyText(text) {
+    try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* не https — пробуем по-старому */ }
+    const ta = Object.assign(document.createElement("textarea"), { value: text });
+    ta.style.cssText = "position:fixed;opacity:0;top:0;left:0";
+    document.body.appendChild(ta); ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    ta.remove();
+    return ok;
+  }
+  async function onCopyClick(e) {
+    const btn = e.target.closest(".copy-btn");
+    if (!btn) return;
+    const bubble = btn.closest(".msg").querySelector(".bubble");
+    const ok = bubble && await copyText(bubble.innerText.trim());
+    btn.innerHTML = ok ? DONE_ICON : COPY_ICON;
+    btn.title = ok ? "Скопировано" : "Не удалось скопировать";
+    btn.classList.toggle("done", !!ok);
+    clearTimeout(btn._t);
+    btn._t = setTimeout(() => { btn.innerHTML = COPY_ICON; btn.title = "Копировать"; btn.classList.remove("done"); }, 1500);
+  }
+
   function buildAgent(m, idx) {
-    const el = h(`<div class="msg agent" data-feed="${idx}" data-kind="${kindOf(m)}"><div class="bubble">${md(m.text)}</div></div>`);
+    const el = h(`<div class="msg agent" data-feed="${idx}" data-kind="${kindOf(m)}"><div class="bubble">${md(m.text)}</div>${m.text ? copyBar() : ""}</div>`);
     (m.blocks || []).forEach((b) => { const node = renderBlock(b); if (node) el.appendChild(node); });
     return el;
   }
@@ -593,6 +620,7 @@
     input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#composer").requestSubmit(); } });
     input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 140) + "px"; });
     $("#newTrip").onclick = newChat;
+    $("#messages").addEventListener("click", onCopyClick);
     $("#newChat").onclick = newChat;
     document.querySelectorAll("#priority button").forEach((b) => b.onclick = () => {
       if (b.classList.contains("on")) return;
