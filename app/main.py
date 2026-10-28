@@ -78,6 +78,39 @@ class ChatIn(BaseModel):
     user_id: str | None = None
     message: str | None = None
     action: dict | None = None
+    label: str | None = None  # как показать действие (кнопку) в ленте чата
+
+
+FEED_KINDS = ("plan", "cart", "destinations")
+
+
+def feed_kind(m: dict) -> str:
+    return next((b["type"] for b in m.get("blocks") or [] if b.get("type") in FEED_KINDS), "")
+
+
+def record_feed(sid: str, user_text: str | None, out: dict, silent: bool) -> None:
+    """Лента чата для переключения между чатами: то же, что видит пользователь.
+    Тихая настройка (тариф, «что важнее») заменяет последнюю карточку того же вида, как и в интерфейсе."""
+    feed = store.get_feed(sid)
+    kind = feed_kind(out)
+    if silent:
+        if kind and out.get("text"):
+            for i in range(len(feed) - 1, -1, -1):
+                if feed[i]["role"] == "agent" and feed_kind(feed[i]["m"]) == kind:
+                    feed[i] = {"role": "agent", "m": out}
+                    break
+    else:
+        if user_text:
+            feed.append({"role": "user", "text": user_text})
+        feed.append({"role": "agent", "m": out})
+    store.save_feed(sid, feed)
+
+
+def own_session(sid: str, user_id: str) -> SessionState:
+    s = _sessions.get(sid) or store.load_session(sid)
+    if not s or s.user_id != user_id:
+        raise HTTPException(404, "чат не найден")
+    return s
 
 
 @app.get("/")
@@ -104,6 +137,7 @@ def new_session(body: NewSession):
     w = agent.welcome(s)
     s.history.append({"role": "agent", "text": w["text"]})
     store.save_session(s)
+    store.save_feed(s.id, [{"role": "agent", "m": w}])
     return {"session_id": s.id, "user_id": uid, "messages": [w], "summary": agent.summary(s)}
 
 
@@ -116,6 +150,8 @@ def chat(body: ChatIn):
     with _lock(s.id):
         out = agent.handle(s, (body.message or "").strip()[:2000] or None, body.action)
         store.save_session(s)
+        silent = bool(body.action and body.action.get("silent"))
+        record_feed(s.id, ((body.label or body.message or "").strip()[:2000] or None), out, silent)
     return {"session_id": s.id, "user_id": s.user_id, "messages": [out], "summary": agent.summary(s), "trace": out.get("trace", [])}
 
 
@@ -123,6 +159,36 @@ def chat(body: ChatIn):
 def session_info(sid: str):
     s = get_session(sid, "anon")
     return {"session_id": s.id, "summary": agent.summary(s), "history": s.history[-50:], "stage": s.stage}
+
+
+@app.get("/api/chats")
+def chats(user_id: str, current: str | None = None):
+    """Список чатов пользователя: пустые (без сообщений пользователя) не показываем, кроме текущего."""
+    items = []
+    for s, updated in store.user_sessions(user_id):
+        if s.turns == 0 and s.id != current:
+            continue
+        items.append({"id": s.id, "title": agent.chat_title(s), "stage": agent.STAGE_LABELS.get(s.stage, ""),
+                      "updated": updated})
+    return items
+
+
+@app.get("/api/session/{sid}/feed")
+def session_feed(sid: str, user_id: str):
+    s = own_session(sid, user_id)
+    _sessions[s.id] = s
+    feed = store.get_feed(s.id) or [  # чаты из старых версий: восстанавливаем хотя бы текст переписки
+        {"role": "user", "text": h["text"]} if h["role"] == "user" else {"role": "agent", "m": {"text": h["text"]}}
+        for h in s.history[-store.FEED_LIMIT:]]
+    return {"session_id": s.id, "feed": feed, "summary": agent.summary(s)}
+
+
+@app.delete("/api/session/{sid}")
+def delete_chat(sid: str, user_id: str):
+    own_session(sid, user_id)
+    store.delete_session(sid)
+    _sessions.pop(sid, None)
+    return {"status": "deleted"}
 
 
 @app.get("/api/profile/{user_id}")

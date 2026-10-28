@@ -1907,6 +1907,25 @@ def do_apply_form(state: SessionState, f: dict, turn: Turn) -> dict:
     return do_destinations(state, turn, reason="Применил ваши параметры — вот что подходит.")
 
 
+STAGE_LABELS = {"start": "новый", "clarify": "уточняю детали", "destinations": "выбор направления",
+                "bundles": "варианты поездки", "cart": "в корзине", "checkout": "оформление", "booked": "забронировано ✓"}
+
+
+def chat_title(state: SessionState) -> str:
+    """Название чата в списке: направление, а пока его нет — начало первого сообщения."""
+    r = state.req
+    if r.destination:
+        try:
+            return DEST_BY_ID[r.destination].name
+        except KeyError:
+            pass
+    first = next((h["text"] for h in state.history if h.get("role") == "user" and h.get("text")), "")
+    first = hide_codes(" ".join(first.split()))
+    if not first:
+        return "Новый чат"
+    return first if len(first) <= 42 else first[:40].rstrip() + "…"
+
+
 def summary(state: SessionState) -> dict:
     r = state.req
     slots = []

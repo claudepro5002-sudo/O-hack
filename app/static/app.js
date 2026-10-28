@@ -40,6 +40,88 @@
     r.messages.forEach((m) => addAgent(m));
     renderSummary(r.summary);
     renderTrace([]);
+    loadChats();
+  }
+
+  // ------------------------------------------------------------------ чаты
+  // Каждый чат — отдельная сессия агента со своей поездкой; лента хранится на сервере.
+  let chatItems = [];
+  const hasUserMessages = () => feed.some((x) => x.role === "user");
+  function renderFeed(list) {
+    feed = list;
+    $("#messages").innerHTML = "";
+    $("#chips").innerHTML = "";
+    feed.forEach((x, i) => (x.role === "user"
+      ? $("#messages").appendChild(h(`<div class="msg user"><div class="bubble">${esc(x.text)}</div></div>`))
+      : addAgent(x.m, true, i)));
+    scrollDown();
+  }
+  async function openChat(id) {
+    if (busy) return false;
+    const r = await api(`/api/session/${encodeURIComponent(id)}/feed?user_id=${encodeURIComponent(userId)}`);
+    sessionId = r.session_id; store.set("ta_session", sessionId);
+    formDirty = false;
+    renderFeed(r.feed || []);
+    renderSummary(r.summary);
+    renderTrace([]);
+    return true;
+  }
+  async function newChat() {
+    closeModal(); closePanel();
+    if (busy) return;
+    if (sessionId && !hasUserMessages()) { $("#input").focus(); return; }  // текущий чат и так пустой
+    await newSession();
+    $("#input").focus();
+  }
+  async function switchChat(id) {
+    closeModal(); closePanel();
+    if (id === sessionId) return;
+    try { if (await openChat(id)) renderChats(); } catch (e) { loadChats(); }
+  }
+  async function deleteChat(id) {
+    if (busy || !confirm("Удалить этот чат? Оформленные поездки останутся в «Моих поездках».")) return;
+    try { await api(`/api/session/${encodeURIComponent(id)}?user_id=${encodeURIComponent(userId)}`, null, "DELETE"); } catch (e) { /* уже удалён */ }
+    if (id === sessionId) {
+      const next = chatItems.find((c) => c.id !== id);
+      if (next) { await openChat(next.id); } else { await newSession(); return; }
+    }
+    loadChats();
+  }
+  const chatTime = (ts) => {
+    const d = new Date(ts * 1000), now = new Date();
+    return d.toDateString() === now.toDateString()
+      ? d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })
+      : d.toLocaleDateString("ru-RU", { day: "numeric", month: "short" });
+  };
+  function chatListEl() {
+    const ul = h(`<ul class="chat-list"></ul>`);
+    if (!chatItems.length) ul.appendChild(h(`<li class="chats-empty">Здесь появятся ваши чаты</li>`));
+    chatItems.forEach((c) => {
+      const li = h(`<li class="chat-item${c.id === sessionId ? " active" : ""}" title="${esc(c.title)}">
+        <div class="ci-text"><div class="ci-title">${esc(c.title)}</div><div class="ci-sub">${esc(c.stage)} · ${chatTime(c.updated)}</div></div>
+        <button class="ci-del" title="Удалить чат" aria-label="Удалить чат">✕</button></li>`);
+      li.onclick = () => switchChat(c.id);
+      $(".ci-del", li).onclick = (e) => { e.stopPropagation(); deleteChat(c.id); };
+      ul.appendChild(li);
+    });
+    return ul;
+  }
+  function renderChats() {
+    const box = $("#chatList");
+    box.replaceWith(Object.assign(chatListEl(), { id: "chatList" }));
+  }
+  async function loadChats() {
+    if (!userId) return;
+    try {
+      chatItems = await api(`/api/chats?user_id=${encodeURIComponent(userId)}&current=${encodeURIComponent(sessionId || "")}`);
+    } catch (e) { return; }
+    renderChats();
+  }
+  function openChats() {
+    const box = h(`<div><h2>Чаты</h2><p><button class="primary small" id="newChatModal">＋ Новый чат</button></p></div>`);
+    box.appendChild(chatListEl());
+    $("#newChatModal", box).onclick = newChat;
+    openModal(box);
   }
 
   async function send(message, action, label) {
@@ -49,12 +131,13 @@
     const typing = h(`<div class="msg agent"><div class="bubble typing">Агент думает</div></div>`);
     $("#messages").appendChild(typing); scrollDown();
     try {
-      const r = await api("/api/chat", { session_id: sessionId, user_id: userId, message, action });
+      const r = await api("/api/chat", { session_id: sessionId, user_id: userId, message, action, label: label || null });
       typing.remove();
       if (r.session_id !== sessionId) { sessionId = r.session_id; store.set("ta_session", sessionId); }
       r.messages.forEach((m) => addAgent(m));
       renderSummary(r.summary);
       renderTrace(r.trace || [], r.messages[0] && r.messages[0].elapsed_ms);
+      loadChats();
     } catch (e) {
       typing.remove();
       addAgent({ text: "Сервер не ответил. Проверьте, что контейнер запущен, и попробуйте ещё раз.", blocks: [], chips: [] });
@@ -64,12 +147,8 @@
   }
 
   // ------------------------------------------------------------------ лента
-  function persist() {
-    const keep = feed.slice(-24);
-    try { sessionStorage.setItem("ta_feed_" + sessionId, JSON.stringify(keep)); } catch (e) { /* noop */ }
-  }
   function addUser(text) {
-    feed.push({ role: "user", text }); persist();
+    feed.push({ role: "user", text });
     $("#messages").appendChild(h(`<div class="msg user"><div class="bubble">${esc(text)}</div></div>`));
     $("#chips").innerHTML = "";
     scrollDown();
@@ -82,7 +161,7 @@
     return el;
   }
   function addAgent(m, restoring, idx) {
-    if (!restoring) { feed.push({ role: "agent", m }); persist(); idx = feed.length - 1; }
+    if (!restoring) { feed.push({ role: "agent", m }); idx = feed.length - 1; }
     $("#messages").appendChild(buildAgent(m, idx));
     renderChips(m.chips || []);
     scrollDown();
@@ -105,7 +184,7 @@
       if (same && same.open) d.open = true;
     });
     old.replaceWith(el);
-    if (feed[idx]) { feed[idx] = { role: "agent", m }; persist(); }
+    if (feed[idx]) feed[idx] = { role: "agent", m };
     if (wasLast) renderChips(m.chips || []);
   }
   const summaryKey = (d) => ((d.querySelector("summary") || {}).textContent || "").replace(/\(\d+\)/, "").trim();
@@ -513,13 +592,14 @@
     $("#composer").onsubmit = (e) => { e.preventDefault(); const v = input.value.trim(); if (!v) return; input.value = ""; input.style.height = ""; send(v); };
     input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#composer").requestSubmit(); } });
     input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 140) + "px"; });
-    $("#newTrip").onclick = () => { closePanel(); if (sessionId) send(null, { type: "reset" }, "Новая поездка"); else newSession(); };
+    $("#newTrip").onclick = newChat;
+    $("#newChat").onclick = newChat;
     document.querySelectorAll("#priority button").forEach((b) => b.onclick = () => {
       if (b.classList.contains("on")) return;
       document.querySelectorAll("#priority button").forEach((x) => x.classList.toggle("on", x === b));
       tweak({ type: "set", key: "priority", value: b.dataset.p });
     });
-    document.querySelectorAll("[data-open]").forEach((b) => b.onclick = () => { closePanel(); ({ trips: openTrips, memory: openMemory, metrics: openMetrics })[b.dataset.open](); });
+    document.querySelectorAll("[data-open]").forEach((b) => b.onclick = () => { closePanel(); ({ chats: openChats, trips: openTrips, memory: openMemory, metrics: openMetrics })[b.dataset.open](); });
     $("#modalClose").onclick = closeModal;
     initForm();
     $("#modal").onclick = (e) => { if (e.target.id === "modal") closeModal(); };
@@ -527,17 +607,10 @@
     document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closePanel(); } });
 
     let restored = false;
-    if (sessionId) {
-      try {
-        const raw = sessionStorage.getItem("ta_feed_" + sessionId);
-        const info = await api(`/api/session/${encodeURIComponent(sessionId)}`);
-        if (raw && info.session_id === sessionId) {
-          feed = JSON.parse(raw);
-          feed.forEach((x, i) => (x.role === "user" ? $("#messages").appendChild(h(`<div class="msg user"><div class="bubble">${esc(x.text)}</div></div>`)) : addAgent(x.m, true, i)));
-          renderSummary(info.summary);
-          restored = true;
-        }
-      } catch (e) { restored = false; }
+    if (sessionId && userId) {
+      try { restored = await openChat(sessionId); } catch (e) { restored = false; }
+      if (restored && !feed.length) restored = false;
+      if (restored) loadChats();
     }
     if (!restored) await newSession();
     input.focus();

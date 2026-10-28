@@ -10,7 +10,7 @@
     // тема до отрисовки, чтобы страница не мигала светлой: сохранённый выбор, иначе — как в системе
     try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
   </script>
-  <link rel="stylesheet" href="/static/styles.css?v=4">
+  <link rel="stylesheet" href="/static/styles.css?v=5">
 </head>
 <body>
 <header class="topbar">
@@ -20,6 +20,7 @@
     <span class="brand-sub">трип-агент</span>
   </div>
   <nav class="top-actions">
+    <button class="ghost chats-toggle" data-open="chats">Чаты</button>
     <button class="ghost" data-open="trips">Мои поездки</button>
     <button class="ghost" data-open="memory">Память</button>
     <button class="ghost" data-open="metrics">Метрики</button>
@@ -30,6 +31,11 @@
 </header>
 
 <main class="layout">
+  <aside class="chats" id="chats" aria-label="Чаты">
+    <div class="chats-head"><span>Чаты</span><button class="small" id="newChat" title="Новый чат">＋ Новый</button></div>
+    <ul class="chat-list" id="chatList"></ul>
+  </aside>
+
   <section class="chat">
     <div id="messages" class="messages" aria-live="polite"></div>
     <div id="chips" class="chips"></div>
@@ -86,6 +92,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=4"></script>
+<script src="/static/app.js?v=5"></script>
 </body>
 </html>

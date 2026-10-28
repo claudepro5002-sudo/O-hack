@@ -34,6 +34,7 @@ def conn() -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, user_id TEXT, type TEXT,
                                            ts REAL, data TEXT);
         CREATE TABLE IF NOT EXISTS places (key TEXT PRIMARY KEY, data TEXT, updated REAL);
+        CREATE TABLE IF NOT EXISTS feeds (session_id TEXT PRIMARY KEY, data TEXT, updated REAL);
         CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
         CREATE INDEX IF NOT EXISTS idx_bookings_user ON bookings(user_id);
         CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
@@ -63,6 +64,42 @@ def load_session(session_id: str):
     if not row:
         return None
     return SessionState.model_validate_json(row["state"])
+
+
+def user_sessions(user_id: str) -> list:
+    """Чаты пользователя, свежие сверху."""
+    from .state import SessionState
+    with _lock:
+        rows = conn().execute("SELECT state, updated FROM sessions WHERE user_id=? ORDER BY updated DESC LIMIT 100",
+                              (user_id,)).fetchall()
+    return [(SessionState.model_validate_json(r["state"]), r["updated"]) for r in rows]
+
+
+def delete_session(session_id: str) -> None:
+    """Удаляем чат и его ленту; брони остаются в «Моих поездках»."""
+    with _lock:
+        c = conn()
+        c.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+        c.execute("DELETE FROM feeds WHERE session_id=?", (session_id,))
+        c.commit()
+
+
+FEED_LIMIT = 60  # сколько последних сообщений чата храним для показа
+
+
+def get_feed(session_id: str) -> list[dict]:
+    with _lock:
+        row = conn().execute("SELECT data FROM feeds WHERE session_id=?", (session_id,)).fetchone()
+    return json.loads(row["data"]) if row else []
+
+
+def save_feed(session_id: str, feed: list[dict]) -> None:
+    with _lock:
+        c = conn()
+        c.execute("INSERT INTO feeds(session_id, data, updated) VALUES(?,?,?) "
+                  "ON CONFLICT(session_id) DO UPDATE SET data=excluded.data, updated=excluded.updated",
+                  (session_id, json.dumps(feed[-FEED_LIMIT:], ensure_ascii=False), time.time()))
+        c.commit()
 
 
 def all_sessions() -> list[dict]:
