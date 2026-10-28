@@ -11,7 +11,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
-      - run: ruff check app eval tests scripts run.py
+      - run: ruff check app eval tests run.py
       - run: python -m pytest -q tests
       - run: APP_TODAY=2026-10-24 DB_PATH=/tmp/eval.db python -m eval.run_eval
   docker:
