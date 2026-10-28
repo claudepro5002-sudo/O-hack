@@ -95,7 +95,7 @@ def test_without_llm_falls_back_to_catalog(monkeypatch):
     monkeypatch.delenv("LLM_API_KEY", raising=False)
     s = SessionState(user_id="w5")
     out = agent.handle(s, "Хочу поехать в Гренландию летом вдвоём")
-    assert "нет" in out["text"] and s.stage == "destinations"
+    assert "не знаю" in out["text"] and "LLM" in out["text"] and s.stage == "destinations"
 
 
 CARDS["Магнитогорск"] = {**card("Магнитогорск", "RU", 53.41, 58.98), "name_gen": "Магнитогорска", "tz": 5}
@@ -170,3 +170,30 @@ def test_llm_repeating_old_place_does_not_block_new_request(monkeypatch):
         {"destination": "antalya", "_unknown_place": "кемпинг", "prefs": ["nature"]}))
     agent.handle(s, "составь поездку на кемпинг")
     assert s.req.destination is None and s.stage == "destinations" and s.unknown_place is None
+
+
+def test_llm_failure_is_reported_honestly(monkeypatch):
+    store.reset_for_tests()
+    llm_env(monkeypatch)
+
+    def busy(*a, **k):
+        llm.last_error = "m1: HTTP 429"
+        return None
+    monkeypatch.setattr(llm, "_chat", busy)
+    s = SessionState(user_id="w-fail")
+    out = agent.handle(s, "Хочу в Италию в июне вдвоём из Москвы")
+    assert "Не получилось узнать у LLM" in out["text"] and "Итали" in out["text"] and "каталоге пока нет" not in out["text"]
+    assert any("HTTP 429" in str(t) for t in out["trace"])
+
+
+def test_chat_tries_next_model_after_timeout(monkeypatch):
+    import httpx
+    llm_env(monkeypatch)
+    monkeypatch.setenv("LLM_MODEL", "slow,fast")
+
+    def fake_request(model, *a, **k):
+        if model == "slow":
+            raise httpx.ReadTimeout("timeout")
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok": 1}'}}]})
+    monkeypatch.setattr(llm, "request", fake_request)
+    assert llm._chat([{"role": "user", "content": "x"}]) == '{"ok": 1}' and llm.last_error is None

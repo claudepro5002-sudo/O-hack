@@ -87,22 +87,40 @@ def strip_thinking(content: str) -> str:
     return content.split("</think>")[-1].strip()
 
 
-def _chat(messages: list[dict], max_tokens: int = 600, json_mode: bool = True) -> str | None:
-    timeout = float(env("LLM_TIMEOUT", "30"))
-    try:
-        with httpx.Client(timeout=timeout) as c:
-            for model in models():
+last_error: str | None = None  # почему последний запрос к LLM не удался — агент честно скажет об этом
+
+
+def _chat(messages: list[dict], max_tokens: int = 600, json_mode: bool = True, timeout: float | None = None) -> str | None:
+    """Запрос к моделям по очереди: ошибка или таймаут одной — пробуем следующую."""
+    global last_error
+    timeout = timeout or float(env("LLM_TIMEOUT", "30"))
+    errors = []
+    with httpx.Client(timeout=timeout) as c:
+        for model in models():
+            try:
                 r = request(model, messages, max_tokens, json_mode, c)
-                if r.status_code in (402, 404, 408, 429) or r.status_code >= 500:
-                    log.warning("LLM %s: HTTP %s — пробую следующую модель", model, r.status_code)
-                    continue
-                r.raise_for_status()
+            except httpx.TimeoutException:
+                errors.append(f"{model}: не ответила за {timeout:.0f} с")
+                continue
+            except httpx.HTTPError as e:
+                errors.append(f"{model}: нет связи с сервисом ({type(e).__name__})")
+                continue
+            if r.status_code != 200:
+                errors.append(f"{model}: HTTP {r.status_code}")
+                if r.status_code in (401, 403):
+                    break  # ключ не подходит — другие модели не помогут
+                continue
+            try:
                 content = strip_thinking(r.json()["choices"][0]["message"].get("content") or "")
-                if content.strip():
-                    return content
-                log.warning("LLM %s вернула пустой ответ (возможно, не хватило max_tokens)", model)
-    except Exception as e:  # noqa: BLE001 — сеть/формат: тихо откатываемся на правила
-        log.warning("LLM недоступна: %s", e)
+            except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+                errors.append(f"{model}: ответ в неожиданном формате")
+                continue
+            if content.strip():
+                last_error = None
+                return content
+            errors.append(f"{model}: пустой ответ")
+    last_error = "; ".join(errors) or "не задана модель"
+    log.warning("LLM не ответила: %s", last_error)
     return None
 
 
@@ -254,16 +272,18 @@ def place_card(query: str) -> dict | None:
     """Сведения о любом месте мира от LLM (для направлений вне ручного каталога)."""
     if not enabled():
         return None
+    global last_error
+    # карточка места длинная — большим моделям даём больше времени, чем на разбор фразы
     raw = _chat([{"role": "system", "content": "Отвечай только валидным JSON."},
-                 {"role": "user", "content": PLACE_PROMPT.format(q=query[:80])}], max_tokens=1600)
+                 {"role": "user", "content": PLACE_PROMPT.format(q=query[:80])}], max_tokens=1600,
+                timeout=max(60.0, float(env("LLM_TIMEOUT", "30"))))
     if not raw:
         return None
     m = re.search(r"\{.*\}", raw, re.S)
-    if not m:
-        return None
     try:
-        return json.loads(m.group(0))
+        return json.loads(m.group(0)) if m else json.loads(raw)
     except json.JSONDecodeError:
+        last_error = "модель вернула сведения о месте не в формате JSON"
         log.warning("place_card: не JSON")
         return None
 
