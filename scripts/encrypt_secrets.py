@@ -157,7 +157,12 @@ def encrypt() -> None:
         errors.append(f"не найдена утилита age. Установите: {INSTALL.get(platform.system(), INSTALL['Linux'])}")
         return
     # именно -o, без > и | — в PowerShell перенаправление портит бинарный файл
-    r = subprocess.run([age, "-r", RECIPIENT, "-o", str(OUT), str(ENV)], cwd=ROOT, capture_output=True, text=True)
+    try:
+        r = subprocess.run([age, "-r", RECIPIENT, "-o", str(OUT), str(ENV)], cwd=ROOT, capture_output=True, text=True)
+    except OSError as e:
+        errors.append(f"не удалось запустить {age}: {e}. Зашифруйте вручную: age.exe -r {RECIPIENT} -o secrets.env.age .env"
+                      " — и запустите скрипт с --check")
+        return
     if r.returncode != 0:
         errors.append(f"age завершился с ошибкой: {r.stderr.strip()}")
     else:
