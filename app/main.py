@@ -39,6 +39,15 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Ostrovok Trip Agent", version="1.0.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
+
+@app.middleware("http")
+async def no_stale_ui(request, call_next):
+    """Интерфейс всегда сверяется с сервером (ETag), чтобы после обновления не показывался старый CSS/JS из кэша."""
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
 _sessions: dict[str, SessionState] = {}
 _locks: dict[str, threading.Lock] = {}
 _glock = threading.Lock()
