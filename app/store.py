@@ -8,12 +8,14 @@ import threading
 import time
 from pathlib import Path
 
+from .config import env
+
 _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
 
 
 def db_path() -> str:
-    return os.getenv("DB_PATH", str(Path(__file__).resolve().parent.parent / "data" / "agent.db"))
+    return env("DB_PATH", str(Path(__file__).resolve().parent.parent / "data" / "agent.db"))
 
 
 def conn() -> sqlite3.Connection:

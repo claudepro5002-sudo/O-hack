@@ -17,6 +17,7 @@ import time
 
 import httpx
 
+from .config import env
 from .data.destinations import DESTINATIONS
 from .data.geo import ORIGINS
 
@@ -32,7 +33,7 @@ PREFS = ["sea", "warm", "mild", "culture", "food", "party", "quiet", "romantic",
 def enabled() -> bool:
     """LLM включена, только если при запуске заданы ключ, адрес API и модель (в коде их нет)."""
     return all(os.getenv(k) for k in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL")) and \
-        os.getenv("LLM_ENABLED", "true").lower() not in ("0", "false", "no")
+        env("LLM_ENABLED", "true").lower() not in ("0", "false", "no")
 
 
 def models() -> list[str]:
@@ -71,7 +72,7 @@ def request(model: str, messages: list[dict], max_tokens: int, json_mode: bool, 
 
 
 def _chat(messages: list[dict], max_tokens: int = 600, json_mode: bool = True) -> str | None:
-    timeout = float(os.getenv("LLM_TIMEOUT", "20"))
+    timeout = float(env("LLM_TIMEOUT", "30"))
     try:
         with httpx.Client(timeout=timeout) as c:
             for model in models():

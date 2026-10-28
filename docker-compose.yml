@@ -9,11 +9,12 @@ services:
     container_name: trip-agent
     ports:
       - "${APP_PORT:-8080}:8080"
+    # .env необязателен: без него агент запускается на встроенных правилах, без LLM
     env_file:
-      - path: .env.example
-        required: true
       - path: .env
         required: false
+    environment:
+      DB_PATH: /data/agent.db  # база всегда в volume, даже если в .env DB_PATH пустой
     volumes:
       - agent-data:/data
     healthcheck:
@@ -32,8 +33,6 @@ services:
     profiles: ["eval"]
     command: ["python", "-m", "eval.run_eval"]
     env_file:
-      - path: .env.example
-        required: true
       - path: .env
         required: false
     environment:

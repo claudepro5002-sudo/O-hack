@@ -12,28 +12,49 @@ AI-агент, который превращает одно сообщение �
 ```bash
 git clone <URL репозитория>
 cd <repo>
-cp .env.example .env   # необязательно: compose сам подхватит .env.example
 docker compose up --build
 # открыть http://localhost:8080
 ```
 
-Сборка занимает ~1–2 минуты (образ ~210 МБ). Никаких ручных доустановок, внешних API и ключей не нужно: без LLM-ключа агент полностью работает на встроенном разборе русского языка. С ключом (любой OpenAI-совместимый API) понимание свободного текста становится ещё устойчивее.
+Сборка занимает ~1–2 минуты (образ ~210 МБ). Ручных доустановок нет. Файл `.env` необязателен: без него агент полностью работает на встроенном разборе русского языка. С LLM (любой OpenAI-совместимый API) понимание свободного текста устойчивее и агент знает любое место мира.
 
-### Запуск с LLM: ключ вводится в терминале
+### Запуск с LLM (для жюри)
 
-Ключ, адрес API и модель в коде не прописаны — их вводят при запуске:
+Ключ для жюри лежит в репозитории только в зашифрованном виде — `secrets.env.age`. Расшифруйте его в `.env` и запустите как обычно:
+
+```bash
+age -d -i <ваш_закрытый_ключ.txt> -o .env secrets.env.age
+docker compose up --build
+```
+
+В логе контейнера появится `Trip agent started. LLM: on (<модель>)`. Если LLM недоступна или упёрлась в лимит, агент сам переключается на запасную модель, а затем на встроенные правила — сервис не падает.
+
+| | |
+|---|---|
+| Провайдер | **OpenRouter** (OpenAI-совместимый API), `LLM_BASE_URL=https://openrouter.ai/api/v1` |
+| Модель | **`google/gemma-4-31b-it:free`**, запасная — `nvidia/nemotron-3-super-120b-a12b:free` (`LLM_MODEL` — через запятую) |
+| Ключ | отдельный ключ OpenRouter, созданный только для жюри |
+
+### Ключи и секреты (для команды)
+
+Открытый `.env` в git, чат и почту не попадает: он в `.gitignore`, организаторам передаётся только `secrets.env.age`, зашифрованный их публичным ключом. Всё делается одной командой:
+
+```bash
+cp .env.example .env                 # впишите LLM_API_KEY, LLM_BASE_URL, LLM_MODEL (ключ — отдельный, для жюри)
+python scripts/encrypt_secrets.py    # проверит .env и создаст secrets.env.age
+git add secrets.env.age .env.example .gitignore && git commit -m "Add encrypted secrets" && git push
+```
+
+Скрипт сам: убирает BOM и переводы строк Windows из `.env`, проверяет формат (без пробелов вокруг `=` и без кавычек), что `.env.example` без значений и `.env` не отслеживается git (и не попадал в историю), что модель указана в README; шифрует через `age -r <ключ организаторов> -o secrets.env.age .env` и проверяет, что результат — бинарный файл age, в котором значения не читаются. Значения ключей скрипт не печатает. `python scripts/encrypt_secrets.py --check` — только проверка перед сдачей (в том числе: не менялся ли `.env` после шифрования). Нужна утилита age: Windows `winget install FiloSottile.age`, macOS `brew install age`, Linux `sudo apt install age`.
+
+### Запуск без Docker
 
 ```bash
 pip install -r requirements.txt
 python run.py
-# Ключ API (ввод скрыт; Enter — запуск без LLM): ********
-# Адрес API, например https://openrouter.ai/api/v1: https://openrouter.ai/api/v1
-# Модель, например meta-llama/llama-3.3-70b-instruct:free: meta-llama/llama-3.3-70b-instruct:free
-# Проверяю подключение… ✓ работает
-# Открывайте http://localhost:8080
 ```
 
-Моделей можно указать несколько через запятую (например `google/gemma-4-31b-it:free,nvidia/nemotron-3-super-120b-a12b:free`): если первая упёрлась в лимит или недоступна, агент сам переключится на следующую. Ключ живёт только в памяти запущенного процесса и нигде не сохраняется. Перед запуском `run.py` делает один пробный запрос и понятно сообщает, если ключ не подходит, кончился баланс или неверно указана модель. В Docker то же самое: `docker compose run --rm --service-ports app python run.py --host 0.0.0.0`. Обычный `docker compose up --build` запускает агента без LLM, без вопросов.
+`run.py` берёт LLM из `.env` и перед запуском делает один пробный запрос: понятно сообщает, если ключ не подходит, кончился баланс или неверно указана модель, и ставит первой ту модель, что отвечает. Если в `.env` ключа нет, спросит ключ (ввод скрыт), адрес API и модель прямо в терминале — такой ключ живёт только в памяти процесса и нигде не сохраняется; Enter на вопросе о ключе — запуск без LLM. `python run.py --ask` — ввести ключ в терминале, даже если он есть в `.env`; `--visible` — если в терминале не работает вставка в скрытое поле.
 
 ## Зависимости и переменные окружения
 
@@ -46,12 +67,13 @@ python run.py
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
 | `APP_PORT` | `8080` | порт на хосте (внутри контейнера всегда 8080) |
-| `LLM_API_KEY` | пусто | ключ OpenAI-совместимого API (удобнее ввести в `python run.py`); пусто — работа только на правилах |
+| `LLM_API_KEY` | пусто | ключ OpenAI-совместимого API (секрет: только в `.env` / `secrets.env.age`); пусто — работа только на правилах |
 | `LLM_BASE_URL` | пусто | адрес OpenAI-совместимого API: OpenRouter `https://openrouter.ai/api/v1`, DeepSeek `https://api.deepseek.com/v1`, Ollama `http://localhost:11434/v1` |
 | `LLM_MODEL` | пусто | имя модели у выбранного сервиса |
 | `LLM_TIMEOUT` | `30` | таймаут запроса к LLM, сек; при ошибке агент тихо откатывается на правила |
+| `LLM_ENABLED` | `true` | `false` — выключить LLM, не удаляя ключ |
 | `DB_PATH` | `/data/agent.db` в Docker, `./data/agent.db` без Docker | путь к SQLite |
-| `TELEGRAM_BOT_TOKEN` | пусто | если задан — тот же агент работает в Telegram (long polling) |
+| `TELEGRAM_BOT_TOKEN` | пусто | секрет; если задан — тот же агент работает в Telegram (long polling) |
 | `APP_TODAY` | пусто | зафиксировать «сегодня» (YYYY-MM-DD) для воспроизводимого демо |
 | `LOG_LEVEL` | `INFO` | уровень логов (всё пишется в stdout: `docker compose logs app`) |
 
@@ -195,10 +217,14 @@ app/
   planner.py         ранжирование, сборка пакетов, оценка, объяснения, состыковки
   inventory.py       синтетический инвентарь: отели, рейсы, поезда, трансферы
   data/              справочник направлений и городов вылета
+  config.py          чтение .env и переменных окружения
   store.py metrics.py telegram_bot.py
   static/            index.html, app.js, styles.css
 eval/                тестовые сценарии и прогон метрик
 tests/               pytest
+scripts/encrypt_secrets.py   проверка .env и шифрование в secrets.env.age
+run.py               запуск без Docker (LLM из .env или ввод ключа в терминале)
+secrets.env.age      зашифрованный .env для жюри (открытый .env — только локально, в .gitignore)
 Dockerfile docker-compose.yml .env.example Makefile
 ```
 
