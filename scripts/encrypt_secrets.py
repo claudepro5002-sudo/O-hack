@@ -150,7 +150,9 @@ def check_output(values: dict[str, str]) -> None:
 
 
 def encrypt() -> None:
-    age = shutil.which("age")
+    # в Windows сначала ищем именно age.exe: в PATH от winget бывает одноимённая папка «age»
+    names = ("age.exe", "age") if platform.system() == "Windows" else ("age",)
+    age = next((p for p in map(shutil.which, names) if p and Path(p).is_file()), None)
     if not age:
         errors.append(f"не найдена утилита age. Установите: {INSTALL.get(platform.system(), INSTALL['Linux'])}")
         return
