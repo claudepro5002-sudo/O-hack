@@ -197,3 +197,27 @@ def test_chat_tries_next_model_after_timeout(monkeypatch):
         return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok": 1}'}}]})
     monkeypatch.setattr(llm, "request", fake_request)
     assert llm._chat([{"role": "user", "content": "x"}]) == '{"ok": 1}' and llm.last_error is None
+
+
+def test_bad_cached_card_is_refetched_and_region_without_suggest_asks_ideas(monkeypatch):
+    store.reset_for_tests()
+    # раньше модель прислала неполную карточку — она лежит в кэше и не должна мешать
+    store.save_place("q:италию", {"kind": "place", "name": "Италия"})
+    global SUGGEST
+    SUGGEST = ["Рим", "Венеция"]
+    saved = CARDS["Италия"]
+    CARDS["Италия"] = {**saved, "suggest": []}  # страна без конкретных мест — идеи спросим отдельно
+    try:
+        fake_llm(monkeypatch, {"_unknown_place": "Италия", "month": 6, "adults": 2, "origin": "MOW"})
+        s = SessionState(user_id="w-it")
+        out = agent.handle(s, "Хочу в Италию в июне вдвоём из Москвы")
+    finally:
+        CARDS["Италия"], SUGGEST = saved, []
+    names = [d["name"] for d in s.dest_options]
+    assert "Рим" in names and "Венеция" in names, out["text"]
+    assert "Не получилось" not in out["text"] and "каталоге пока нет" not in out["text"]
+
+
+def test_parse_json_forgives_model_quirks():
+    assert llm.parse_json('```json\n{"a": [1, 2,], // коммент\n "b": "https://x.ru"}\n```') == {"a": [1, 2], "b": "https://x.ru"}
+    assert llm.parse_json("не JSON") is None

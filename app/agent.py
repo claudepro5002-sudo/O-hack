@@ -258,7 +258,7 @@ def apply_updates(state: SessionState, upd: dict, turn: Turn) -> set[str]:
         if res is None:
             reason = llm.last_error or "модель не смогла описать это место"
             turn.tool("llm_place_card", {"place": query}, f"не получилось: {reason}")
-            unknown = {**unknown, "llm_failed": True}
+            unknown = {**unknown, "llm_failed": reason}
         if res and res["kind"] == "place":
             turn.tool("llm_place_card", {"place": query}, f"направление: {DEST_BY_ID[res['dest_id']].name}")
             upd["destination"] = res["dest_id"]
@@ -883,9 +883,10 @@ def ask(state: SessionState, missing: list[str], turn: Turn) -> dict:
 
 def unknown_note(place: dict) -> str:
     if place.get("llm_failed"):
-        return (f"⚠️ Не получилось узнать у LLM подробности про «{place.get('query') or place['name']}» — модель сейчас "
-                f"не ответила (бесплатные модели бывают перегружены). Напишите это место ещё раз через минуту, "
-                f"а пока подберу похожее из проверенного каталога.")
+        busy = re.search(r"HTTP (429|5\d\d)|не ответила|нет связи", str(place["llm_failed"]))
+        why = "модель сейчас перегружена или не ответила" if busy else "модель ответила неполными сведениями"
+        return (f"⚠️ Не получилось узнать у LLM подробности про «{place.get('query') or place['name']}» — {why}. "
+                f"Напишите это место ещё раз через минуту, а пока подберу похожее из проверенного каталога.")
     if not llm.enabled() and not place.get("kind"):
         return (f"❗ «{place['name']}» без подключённой LLM я не знаю — сейчас агент работает только по каталогу из 33 "
                 f"направлений. Чтобы он понимал любое место мира, укажите LLM_API_KEY, LLM_BASE_URL и LLM_MODEL в .env. "

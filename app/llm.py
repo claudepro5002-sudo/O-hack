@@ -124,6 +124,24 @@ def _chat(messages: list[dict], max_tokens: int = 600, json_mode: bool = True, t
     return None
 
 
+def parse_json(raw: str | None) -> dict | None:
+    """JSON-объект из ответа модели. Прощаем частые огрехи: ```json-обёртку, текст вокруг,
+    // комментарии и запятую перед закрывающей скобкой."""
+    if not raw:
+        return None
+    m = re.search(r"\{.*\}", raw, re.S)
+    if not m:
+        return None
+    text = m.group(0)
+    for attempt in (text, re.sub(r",\s*([}\]])", r"\1", re.sub(r"(?m)^\s*//.*$|(?<=[,\[{\s])//[^\n\"]*$", "", text))):
+        try:
+            data = json.loads(attempt)
+            return data if isinstance(data, dict) else None
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
 def _system_prompt(today_iso: str) -> str:
     dests = ", ".join(f"{d.id}={d.name} ({d.country})" for d in DESTINATIONS)
     origins = ", ".join(f"{o.code}={o.name}" for o in ORIGINS)
@@ -159,14 +177,8 @@ def extract(text: str, stage: str, context: str, today_iso: str) -> dict | None:
         {"role": "system", "content": _system_prompt(today_iso)},
         {"role": "user", "content": f"Этап диалога: {stage}. Что уже известно: {context}\nСообщение: {text}"},
     ])
-    if not raw:
-        return None
-    m = re.search(r"\{.*\}", raw, re.S)
-    if not m:
-        return None
-    try:
-        data = json.loads(m.group(0))
-    except json.JSONDecodeError:
+    data = parse_json(raw)
+    if data is None:
         return None
     log.info("LLM extract %.2fs: %s", time.time() - t0, data)
     return _validate(data)
@@ -279,13 +291,13 @@ def place_card(query: str) -> dict | None:
                 timeout=max(60.0, float(env("LLM_TIMEOUT", "30"))))
     if not raw:
         return None
-    m = re.search(r"\{.*\}", raw, re.S)
-    try:
-        return json.loads(m.group(0)) if m else json.loads(raw)
-    except json.JSONDecodeError:
+    card = parse_json(raw)
+    if card is None:
         last_error = "модель вернула сведения о месте не в формате JSON"
-        log.warning("place_card: не JSON")
+        log.warning("place_card %r: не JSON: %s", query, raw[:300])
         return None
+    log.info("place_card %r: kind=%s name=%s suggest=%s", query, card.get("kind"), card.get("name"), card.get("suggest"))
+    return card
 
 
 SUGGEST_PROMPT = """Ты — эксперт по путешествиям. Турист из России (вылет: {origin}) ищет поездку: {summary}.
@@ -300,12 +312,8 @@ def suggest_places(summary: str, origin: str) -> list[str]:
         return []
     raw = _chat([{"role": "system", "content": "Отвечай только валидным JSON."},
                  {"role": "user", "content": SUGGEST_PROMPT.format(summary=summary[:400], origin=origin)}], max_tokens=300)
-    m = re.search(r"\{.*\}", raw or "", re.S)
-    if not m:
-        return []
-    try:
-        places = json.loads(m.group(0)).get("places", [])
-    except (json.JSONDecodeError, AttributeError):
+    places = (parse_json(raw) or {}).get("places", [])
+    if not isinstance(places, list):
         return []
     return [str(p).strip()[:60] for p in places if isinstance(p, str) and p.strip()][:5]
 

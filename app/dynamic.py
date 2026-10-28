@@ -210,6 +210,30 @@ def place(query: str) -> str | None:
     return dest_id
 
 
+def _resolve_card(query: str, card: dict) -> dict | None:
+    """Карточка → направление(я); None, если по ней нечего предложить."""
+    kind = card.get("kind") or "place"
+    if kind == "place":
+        dest_id = dest_id_for(card.get("name") or query)
+        d = build_destination(card, dest_id)
+        if d is None:
+            llm.last_error = "модель прислала неполные сведения о месте (нет координат или климата)"
+            return None
+        store.save_place("id:" + dest_id, card)
+        DEST_BY_ID[dest_id] = d
+        return {"kind": "place", "dest_id": dest_id, "name": d.name}
+    label = str(card.get("name") or query)[:60]
+    names = [str(n) for n in (card.get("suggest") or []) if n][:4]
+    if not names:  # страна/регион без конкретных мест — спросим идеи отдельно
+        names = llm.suggest_places(f"поездка: {label}, лучшие города и курорты", "Москва")[:4]
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        ids = list(dict.fromkeys(i for i in ex.map(place, names) if i))
+    if not ids:
+        llm.last_error = llm.last_error or f"модель не предложила конкретных мест для «{label}»"
+        return None
+    return {"kind": kind, "label": label, "note": str(card.get("note") or "")[:300], "dest_ids": ids}
+
+
 def resolve(query: str) -> dict | None:
     """Разобрать названное пользователем место.
 
@@ -219,24 +243,14 @@ def resolve(query: str) -> dict | None:
     if cat:
         return {"kind": "place", "dest_id": cat}
     key = "q:" + norm_key(query)
-    card = store.get_place(key) or llm.place_card(query)
-    if not card:
-        return None
-    store.save_place(key, card)
-    kind = card.get("kind") or "place"
-    if kind == "place":
-        dest_id = dest_id_for(card.get("name") or query)
-        d = build_destination(card, dest_id)
-        if d is None:
-            return None
-        store.save_place("id:" + dest_id, card)
-        DEST_BY_ID[dest_id] = d
-        return {"kind": "place", "dest_id": dest_id, "name": d.name}
-    names = [str(n) for n in (card.get("suggest") or []) if n][:4]
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        ids = [i for i in ex.map(place, names) if i]
-    return {"kind": kind, "label": str(card.get("name") or query)[:60], "note": str(card.get("note") or "")[:300],
-            "dest_ids": list(dict.fromkeys(ids))}
+    cached = store.get_place(key)
+    res = _resolve_card(query, cached) if cached else None
+    if res is None:  # в кэше нет или там неудачная карточка — спрашиваем модель заново
+        card = llm.place_card(query)
+        res = _resolve_card(query, card) if card else None
+        if res is not None:
+            store.save_place(key, card)  # кэшируем только карточки, по которым что-то нашлось
+    return res
 
 
 # ---------------------------------------------------------------- города вылета
