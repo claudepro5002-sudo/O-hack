@@ -79,7 +79,7 @@ a { color: var(--accent-text); }
 /* side panel */
 .panel { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; }
 .panel-card { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px; }
-.panel-card.grow { flex: 1; min-height: 200px; }
+.panel-card.grow { flex: 1 0 auto; min-height: 200px; }  /* до низа панели и не меньше своего текста */
 .panel-title { font-weight: 700; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .hint { font-weight: 400; color: var(--muted); font-size: 12px; }
 .muted { color: var(--muted); }
