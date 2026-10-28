@@ -39,18 +39,6 @@ docker compose up --build
 
 **Почему так.** Агенту от LLM нужно две вещи: разобрать русскую фразу в JSON с параметрами поездки и выдать «карточку» любого места мира (координаты, аэропорт, климат по месяцам). Бесплатные модели OpenRouter иногда упираются в лимит запросов (HTTP 429), поэтому моделей несколько: при ошибке агент сам переходит к следующей, а у рассуждающих моделей «мысли» отключаются (`reasoning.effort=low`, `exclude`), чтобы ответ приходил быстро. Если недоступны все модели, агент продолжает работать на встроенных правилах — сервис не падает. Подойдёт и другой OpenAI-совместимый провайдер (например, cloud.ru Foundation Models): достаточно поменять `LLM_BASE_URL`, `LLM_API_KEY` и `LLM_MODEL` в `.env`.
 
-### Ключи и секреты (для команды)
-
-Открытый `.env` в git, чат и почту не попадает: он в `.gitignore`, организаторам передаётся только `secrets.env.age`, зашифрованный их публичным ключом. Всё делается одной командой:
-
-```bash
-cp .env.example .env                 # впишите LLM_API_KEY, LLM_BASE_URL, LLM_MODEL (ключ — отдельный, для жюри)
-python scripts/encrypt_secrets.py    # проверит .env и создаст secrets.env.age
-git add secrets.env.age .env.example .gitignore && git commit -m "Add encrypted secrets" && git push
-```
-
-Скрипт сам: убирает BOM и переводы строк Windows из `.env`, проверяет формат (без пробелов вокруг `=` и без кавычек), что `.env.example` без значений и `.env` не отслеживается git (и не попадал в историю), что модель указана в README; шифрует через `age -r <ключ организаторов> -o secrets.env.age .env` и проверяет, что результат — бинарный файл age, в котором значения не читаются. Значения ключей скрипт не печатает. `python scripts/encrypt_secrets.py --check` — только проверка перед сдачей (в том числе: не менялся ли `.env` после шифрования). Нужна утилита age: Windows `winget install FiloSottile.age`, macOS `brew install age`, Linux `sudo apt install age`.
-
 ### Запуск без Docker
 
 ```bash
@@ -226,7 +214,6 @@ app/
   static/            index.html, app.js, styles.css
 eval/                тестовые сценарии и прогон метрик
 tests/               pytest
-scripts/encrypt_secrets.py   проверка .env и шифрование в secrets.env.age
 run.py               запуск без Docker (LLM из .env или ввод ключа в терминале)
 secrets.env.age      зашифрованный .env для жюри (открытый .env — только локально, в .gitignore)
 Dockerfile docker-compose.yml .env.example Makefile
