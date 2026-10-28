@@ -31,13 +31,13 @@ docker compose up --build
 
 | | |
 |---|---|
-| Провайдер | **OpenRouter** (OpenAI-совместимый API), `LLM_BASE_URL=https://openrouter.ai/api/v1` |
-| Модель | **`google/gemma-4-31b-it:free`**; запасные — `nvidia/nemotron-3-super-120b-a12b:free`, `nvidia/nemotron-3-ultra-550b-a55b:free` |
-| Ключ | отдельный ключ OpenRouter, созданный только для жюри |
+| Провайдер | **cloud.ru Evolution Foundation Models** (OpenAI-совместимый API), `LLM_BASE_URL=https://foundation-models.api.cloud.ru/v1` |
+| Модель | **`ai-sage/GigaChat3.5-432B-A28B`** (Сбер); запасные — `Qwen/Qwen3.5-397B-A17B`, `deepseek-ai/DeepSeek-V4-Pro` |
+| Ключ | отдельный API-ключ cloud.ru, созданный только для жюри |
 
-`.env` для жюри: `LLM_BASE_URL=https://openrouter.ai/api/v1`, `LLM_MODEL=google/gemma-4-31b-it:free,nvidia/nemotron-3-super-120b-a12b:free,nvidia/nemotron-3-ultra-550b-a55b:free`.
+`.env` для жюри: `LLM_BASE_URL=https://foundation-models.api.cloud.ru/v1`, `LLM_MODEL=ai-sage/GigaChat3.5-432B-A28B,Qwen/Qwen3.5-397B-A17B,deepseek-ai/DeepSeek-V4-Pro`.
 
-**Почему так.** Агенту от LLM нужно две вещи: разобрать русскую фразу в JSON с параметрами поездки и выдать «карточку» любого места мира (координаты, аэропорт, климат по месяцам). Бесплатные модели OpenRouter иногда упираются в лимит запросов (HTTP 429), поэтому моделей несколько: при ошибке агент сам переходит к следующей, а у рассуждающих моделей «мысли» отключаются (`reasoning.effort=low`, `exclude`), чтобы ответ приходил быстро. Если недоступны все модели, агент продолжает работать на встроенных правилах — сервис не падает. Подойдёт и другой OpenAI-совместимый провайдер (например, cloud.ru Foundation Models): достаточно поменять `LLM_BASE_URL`, `LLM_API_KEY` и `LLM_MODEL` в `.env`.
+**Почему эта модель.** Агенту от LLM нужно две вещи: разобрать русскую фразу в JSON с параметрами поездки и выдать «карточку» любого места мира (координаты, аэропорт, климат по месяцам). GigaChat 3.5 — крупная модель с сильным русским и поддержкой Structured Output, и она не тратит время на «рассуждения», поэтому отвечает быстро. Если она недоступна, агент сам переходит к запасным моделям; у рассуждающих (Qwen 3.5, DeepSeek V4) режим «мыслей» выключается (`chat_template_kwargs.enable_thinking=false`), а если сервер не принимает доп. параметры, запрос повторяется без них. Без LLM агент продолжает работать на встроенных правилах — сервис не падает.
 
 ### Запуск без Docker
 

@@ -93,14 +93,14 @@ def main() -> None:
         key, base, model = (env(k) for k in LLM_VARS)
         print(f"LLM из .env: {base}, модель {model} (ключ …{key[-4:]})")
     else:
-        print("Подключение LLM (OpenRouter или любой другой OpenAI-совместимый API).")
+        print("Подключение LLM (cloud.ru Foundation Models или любой другой OpenAI-совместимый API).")
         print("Чтобы не вводить каждый раз, впишите LLM_API_KEY, LLM_BASE_URL и LLM_MODEL в файл .env.")
         key = read_key(args.visible)
         if key:
             print(f"Ключ получен: {len(key)} символов, оканчивается на …{key[-4:]}")
         base = model = ""
     if key and not (base and model):
-        base = ask("Адрес API, например https://openrouter.ai/api/v1", env("LLM_BASE_URL"))
+        base = ask("Адрес API, например https://foundation-models.api.cloud.ru/v1", env("LLM_BASE_URL"))
         model = ask("Модель (можно несколько через запятую — запасные на случай лимитов)", env("LLM_MODEL"))
         if not base or not model:
             print("Не указан адрес API или модель — запускаю без LLM.")
