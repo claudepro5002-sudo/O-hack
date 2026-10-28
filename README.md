@@ -31,9 +31,13 @@ docker compose up --build
 
 | | |
 |---|---|
-| Провайдер | **OpenRouter** (OpenAI-совместимый API), `LLM_BASE_URL=https://openrouter.ai/api/v1` |
-| Модель | **`google/gemma-4-31b-it:free`**, запасная — `nvidia/nemotron-3-super-120b-a12b:free` (`LLM_MODEL` — через запятую) |
-| Ключ | отдельный ключ OpenRouter, созданный только для жюри |
+| Провайдер | **cloud.ru Evolution Foundation Models** (OpenAI-совместимый API), `LLM_BASE_URL=https://foundation-models.api.cloud.ru/v1` |
+| Модель | **`ai-sage/GigaChat3.5-432B-A28B`** (Сбер); запасные — `Qwen/Qwen3.5-397B-A17B`, `deepseek-ai/DeepSeek-V4-Pro` |
+| Ключ | отдельный API-ключ cloud.ru, созданный только для жюри |
+
+`.env` для жюри: `LLM_BASE_URL=https://foundation-models.api.cloud.ru/v1`, `LLM_MODEL=ai-sage/GigaChat3.5-432B-A28B,Qwen/Qwen3.5-397B-A17B,deepseek-ai/DeepSeek-V4-Pro`.
+
+**Почему эта модель.** Агенту от LLM нужно две вещи: разобрать русскую фразу в JSON с параметрами поездки и выдать «карточку» любого места мира (координаты, аэропорт, климат по месяцам). GigaChat 3.5 — крупная модель с сильным русским и поддержкой Structured Output, и она не тратит время на «рассуждения», поэтому отвечает быстро. Если она недоступна, агент сам переходит к запасным моделям; у рассуждающих (Qwen 3.5, DeepSeek V4) режим «мыслей» выключается (`chat_template_kwargs.enable_thinking=false`), а если сервер не принимает доп. параметры, запрос повторяется без них. Без LLM агент продолжает работать на встроенных правилах.
 
 ### Ключи и секреты (для команды)
 
@@ -68,7 +72,7 @@ python run.py
 |---|---|---|
 | `APP_PORT` | `8080` | порт на хосте (внутри контейнера всегда 8080) |
 | `LLM_API_KEY` | пусто | ключ OpenAI-совместимого API (секрет: только в `.env` / `secrets.env.age`); пусто — работа только на правилах |
-| `LLM_BASE_URL` | пусто | адрес OpenAI-совместимого API: OpenRouter `https://openrouter.ai/api/v1`, DeepSeek `https://api.deepseek.com/v1`, Ollama `http://localhost:11434/v1` |
+| `LLM_BASE_URL` | пусто | адрес OpenAI-совместимого API: cloud.ru `https://foundation-models.api.cloud.ru/v1`, OpenRouter `https://openrouter.ai/api/v1`, DeepSeek `https://api.deepseek.com/v1`, Ollama `http://localhost:11434/v1` |
 | `LLM_MODEL` | пусто | имя модели у выбранного сервиса |
 | `LLM_TIMEOUT` | `30` | таймаут запроса к LLM, сек; при ошибке агент тихо откатывается на правила |
 | `LLM_ENABLED` | `true` | `false` — выключить LLM, не удаляя ключ |

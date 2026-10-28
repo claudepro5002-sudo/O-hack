@@ -47,12 +47,16 @@ def model_name() -> str | None:
 
 def is_reasoning_model(model: str) -> bool:
     m = model.lower()
-    return any(x in m for x in ("gpt-oss", "deepseek-r1", "reasoner", "qwq", ":thinking", "o1", "o3", "o4-mini", "-r1",
-                                "nemotron", "gemma-4", "reasoning"))
+    return any(x in m for x in ("gpt-oss", "deepseek-r1", "deepseek-v4", "reasoner", "qwq", ":thinking", "o1", "o3",
+                                "o4-mini", "-r1", "nemotron", "gemma-4", "reasoning", "qwen3.5", "qwen3.6", "minimax",
+                                "kimi", "glm-4"))
+
+
+EXTRA_KEYS = ("response_format", "reasoning", "reasoning_effort", "chat_template_kwargs")
 
 
 def request(model: str, messages: list[dict], max_tokens: int, json_mode: bool, client: httpx.Client) -> httpx.Response:
-    """Один запрос к chat/completions с учётом особенностей модели."""
+    """Один запрос к chat/completions с учётом особенностей модели и провайдера."""
     base = os.getenv("LLM_BASE_URL", "").rstrip("/")
     reasoning = is_reasoning_model(model)
     if reasoning:
@@ -60,15 +64,27 @@ def request(model: str, messages: list[dict], max_tokens: int, json_mode: bool, 
     body = {"model": model, "messages": messages, "temperature": 0, "max_tokens": max_tokens}
     if reasoning and "openrouter.ai" in base:
         body["reasoning"] = {"effort": "low", "exclude": True}
+    elif reasoning:
+        # vLLM-совместимые облака (cloud.ru Foundation Models и др.): «мысли» выключаем — агенту нужен быстрый JSON
+        if "gpt-oss" in model.lower():
+            body["reasoning_effort"] = "low"
+        else:
+            body["chat_template_kwargs"] = {"enable_thinking": False, "thinking": False}
     if json_mode:
         body["response_format"] = {"type": "json_object"}
     headers = {"Authorization": f"Bearer {os.getenv('LLM_API_KEY')}", "Content-Type": "application/json"}
     r = client.post(f"{base}/chat/completions", json=body, headers=headers)
-    if r.status_code == 400 and (json_mode or "reasoning" in body):  # сервер не знает доп. параметры
-        body.pop("response_format", None)
-        body.pop("reasoning", None)
+    if r.status_code in (400, 422) and any(k in body for k in EXTRA_KEYS):  # сервер не знает доп. параметры
+        for k in EXTRA_KEYS:
+            body.pop(k, None)
         r = client.post(f"{base}/chat/completions", json=body, headers=headers)
     return r
+
+
+def strip_thinking(content: str) -> str:
+    """Убираем «мысли» модели, если сервер вернул их в тексте ответа."""
+    content = re.sub(r"<think>.*?</think>", "", content, flags=re.S)
+    return content.split("</think>")[-1].strip()
 
 
 def _chat(messages: list[dict], max_tokens: int = 600, json_mode: bool = True) -> str | None:
@@ -81,7 +97,7 @@ def _chat(messages: list[dict], max_tokens: int = 600, json_mode: bool = True) -
                     log.warning("LLM %s: HTTP %s — пробую следующую модель", model, r.status_code)
                     continue
                 r.raise_for_status()
-                content = r.json()["choices"][0]["message"].get("content") or ""
+                content = strip_thinking(r.json()["choices"][0]["message"].get("content") or "")
                 if content.strip():
                     return content
                 log.warning("LLM %s вернула пустой ответ (возможно, не хватило max_tokens)", model)
